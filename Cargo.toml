@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "crates/cli",
+    "crates/core",
+    "crates/terminal",
+    "crates/server",
+    "crates/client",
+    "crates/renderer-tty",
+    "crates/layout",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/bmo/vtx"
+
+[workspace.dependencies]
+vtx-core = { path = "crates/core" }
+vtx-terminal = { path = "crates/terminal" }
+vtx-server = { path = "crates/server" }
+vtx-client = { path = "crates/client" }
+vtx-renderer-tty = { path = "crates/renderer-tty" }
+vtx-layout = { path = "crates/layout" }
+
+# External deps (pinned at workspace level)
+tokio = { version = "1", features = ["full"] }
+crossterm = "0.28"
+vte = "0.13"
+portable-pty = "0.8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+bitflags = "2"
+nix = { version = "0.29", features = ["term", "signal", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+bytes = "1"
+libc = "0.2"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }

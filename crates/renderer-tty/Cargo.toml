@@ -1,0 +1,10 @@
+[package]
+name = "vtx-renderer-tty"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vtx-core = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
+tracing = { workspace = true }

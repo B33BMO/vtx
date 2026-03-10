@@ -1,0 +1,17 @@
+[package]
+name = "vtx"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "vtx"
+path = "src/main.rs"
+
+[dependencies]
+vtx-core = { workspace = true }
+vtx-server = { workspace = true }
+vtx-client = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

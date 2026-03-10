@@ -1,0 +1,14 @@
+[package]
+name = "vtx-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vtx-core = { workspace = true }
+vtx-renderer-tty = { workspace = true }
+tokio = { workspace = true }
+crossterm = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }

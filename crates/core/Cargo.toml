@@ -1,0 +1,14 @@
+[package]
+name = "vtx-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bitflags = { workspace = true }
+unicode-width = { workspace = true }
+bytes = { workspace = true }
+libc = { workspace = true }
+mlua = { workspace = true }

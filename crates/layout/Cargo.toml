@@ -1,0 +1,8 @@
+[package]
+name = "vtx-layout"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vtx-core = { workspace = true }
+serde = { workspace = true }

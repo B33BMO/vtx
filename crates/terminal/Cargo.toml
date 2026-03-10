@@ -1,0 +1,10 @@
+[package]
+name = "vtx-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vtx-core = { workspace = true }
+vte = { workspace = true }
+unicode-width = { workspace = true }
+tracing = { workspace = true }
