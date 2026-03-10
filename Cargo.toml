@@ -6,7 +6,9 @@ members = [
     "crates/server",
     "crates/client",
     "crates/renderer-tty",
+    "crates/renderer-gpu",
     "crates/layout",
+    "crates/plugin",
 ]
 resolver = "2"
 
@@ -22,7 +24,9 @@ vtx-terminal = { path = "crates/terminal" }
 vtx-server = { path = "crates/server" }
 vtx-client = { path = "crates/client" }
 vtx-renderer-tty = { path = "crates/renderer-tty" }
+vtx-renderer-gpu = { path = "crates/renderer-gpu" }
 vtx-layout = { path = "crates/layout" }
+vtx-plugin = { path = "crates/plugin" }
 
 # External deps (pinned at workspace level)
 tokio = { version = "1", features = ["full"] }

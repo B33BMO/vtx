@@ -1,0 +1,12 @@
+[package]
+name = "vtx-renderer-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vtx-core = { workspace = true }
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+tracing = { workspace = true }
