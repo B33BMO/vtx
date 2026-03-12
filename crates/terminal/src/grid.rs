@@ -558,4 +558,36 @@ impl Grid {
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
+
+    /// Search the scrollback + screen buffer for `query`, returning line indices
+    /// (in the virtual buffer coordinate space) where matches occur.
+    /// Results are ordered from bottom (most recent) to top (oldest).
+    pub fn search(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let query_lower = query.to_lowercase();
+        let sb_len = self.scrollback.len();
+        let total = sb_len + self.rows as usize;
+        let mut results = Vec::new();
+
+        // Search backwards from the bottom (most recent first)
+        for i in (0..total).rev() {
+            let line_text: String = if i < sb_len {
+                // Line from scrollback
+                self.scrollback[i].iter().map(|c| c.c).collect()
+            } else {
+                // Line from current screen
+                let screen_row = (i - sb_len) as u16;
+                (0..self.cols).map(|x| self.cell(x, screen_row).c).collect()
+            };
+
+            if line_text.to_lowercase().contains(&query_lower) {
+                results.push(i);
+            }
+        }
+
+        results
+    }
 }

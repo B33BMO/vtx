@@ -3,6 +3,9 @@ name = "vtx"
 version.workspace = true
 edition.workspace = true
 
+[features]
+gpu = ["vtx-client/gpu"]
+
 [[bin]]
 name = "vtx"
 path = "src/main.rs"

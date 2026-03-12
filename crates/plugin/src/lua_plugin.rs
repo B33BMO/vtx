@@ -14,6 +14,14 @@ pub enum PluginAction {
     SendKeys { pane_id: u32, data: Vec<u8> },
     Split { horizontal: bool },
     Notify { message: String },
+    NewWindow { name: Option<String> },
+    RunCommand { command: String },
+    SetLayout { preset: String },
+    RenameWindow { name: String },
+    ZoomPane,
+    SelectWindow { index: usize },
+    KillPane,
+    Popup { command: Option<String> },
 }
 
 /// A single loaded Lua plugin.
@@ -143,6 +151,94 @@ impl LuaPlugin {
                 Ok(())
             })?;
             vtx.set("notify", notify)?;
+
+            // vtx.new_window(name) — name is optional (nil = default)
+            let actions_ref = Arc::clone(&actions);
+            let new_window = lua.create_function(move |_, name: Option<String>| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::NewWindow { name });
+                Ok(())
+            })?;
+            vtx.set("new_window", new_window)?;
+
+            // vtx.run(command) — split and run a command
+            let actions_ref = Arc::clone(&actions);
+            let run_command = lua.create_function(move |_, command: String| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::RunCommand { command });
+                Ok(())
+            })?;
+            vtx.set("run", run_command)?;
+
+            // vtx.set_layout(preset) — apply a layout preset by name
+            let actions_ref = Arc::clone(&actions);
+            let set_layout = lua.create_function(move |_, preset: String| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::SetLayout { preset });
+                Ok(())
+            })?;
+            vtx.set("set_layout", set_layout)?;
+
+            // vtx.rename_window(name)
+            let actions_ref = Arc::clone(&actions);
+            let rename_window = lua.create_function(move |_, name: String| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::RenameWindow { name });
+                Ok(())
+            })?;
+            vtx.set("rename_window", rename_window)?;
+
+            // vtx.zoom() — toggle zoom on focused pane
+            let actions_ref = Arc::clone(&actions);
+            let zoom = lua.create_function(move |_, ()| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::ZoomPane);
+                Ok(())
+            })?;
+            vtx.set("zoom", zoom)?;
+
+            // vtx.select_window(index) — 0-based index
+            let actions_ref = Arc::clone(&actions);
+            let select_window = lua.create_function(move |_, index: usize| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::SelectWindow { index });
+                Ok(())
+            })?;
+            vtx.set("select_window", select_window)?;
+
+            // vtx.kill_pane()
+            let actions_ref = Arc::clone(&actions);
+            let kill_pane = lua.create_function(move |_, ()| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::KillPane);
+                Ok(())
+            })?;
+            vtx.set("kill_pane", kill_pane)?;
+
+            // vtx.popup(command) — command is optional
+            let actions_ref = Arc::clone(&actions);
+            let popup = lua.create_function(move |_, command: Option<String>| {
+                actions_ref
+                    .lock()
+                    .unwrap()
+                    .push(PluginAction::Popup { command });
+                Ok(())
+            })?;
+            vtx.set("popup", popup)?;
 
             // vtx.get_panes() — returns empty list for now (wired up when integrated with server)
             let get_panes = lua.create_function(|lua, ()| {
@@ -336,5 +432,60 @@ mod tests {
         "#;
         let result = LuaPlugin::load_from_str("test", source);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vtx_run_command() {
+        let source = r#"
+            vtx.register_hook("on_pane_create", function(ctx)
+                vtx.run("htop")
+            end)
+        "#;
+        let plugin = LuaPlugin::load_from_str("test", source).unwrap();
+        let ctx = HookContext {
+            pane_id: Some(1),
+            ..Default::default()
+        };
+        let actions = plugin.dispatch_hook(HookEvent::PaneCreate, &ctx);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            PluginAction::RunCommand { command } => assert_eq!(command, "htop"),
+            other => panic!("expected RunCommand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_vtx_new_window() {
+        // Test with a name
+        let source = r#"
+            vtx.register_hook("on_pane_create", function(ctx)
+                vtx.new_window("my-window")
+            end)
+        "#;
+        let plugin = LuaPlugin::load_from_str("test_named", source).unwrap();
+        let ctx = HookContext {
+            pane_id: Some(1),
+            ..Default::default()
+        };
+        let actions = plugin.dispatch_hook(HookEvent::PaneCreate, &ctx);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            PluginAction::NewWindow { name } => assert_eq!(name.as_deref(), Some("my-window")),
+            other => panic!("expected NewWindow, got {:?}", other),
+        }
+
+        // Test without a name (nil)
+        let source_nil = r#"
+            vtx.register_hook("on_pane_create", function(ctx)
+                vtx.new_window()
+            end)
+        "#;
+        let plugin2 = LuaPlugin::load_from_str("test_nil", source_nil).unwrap();
+        let actions2 = plugin2.dispatch_hook(HookEvent::PaneCreate, &ctx);
+        assert_eq!(actions2.len(), 1);
+        match &actions2[0] {
+            PluginAction::NewWindow { name } => assert_eq!(*name, None),
+            other => panic!("expected NewWindow with None, got {:?}", other),
+        }
     }
 }

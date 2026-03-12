@@ -44,4 +44,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
 bytes = "1"
 libc = "0.2"
-mlua = { version = "0.10", features = ["lua54", "vendored"] }
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
+winit = "0.30"

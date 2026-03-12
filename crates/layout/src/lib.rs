@@ -1,11 +1,120 @@
 use serde::{Deserialize, Serialize};
 use vtx_core::PaneId;
+pub use vtx_core::ipc::LayoutPreset;
 
 /// Direction of a split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDir {
     Horizontal,
     Vertical,
+}
+
+/// Build a layout tree from a list of pane IDs using a preset.
+pub fn build_preset(preset: &LayoutPreset, panes: &[PaneId]) -> LayoutNode {
+    if panes.is_empty() {
+        // Should not happen, but return a dummy
+        return LayoutNode::Pane(PaneId(0));
+    }
+    if panes.len() == 1 {
+        return LayoutNode::Pane(panes[0]);
+    }
+
+    match preset {
+        LayoutPreset::EvenHorizontal => build_even_chain(panes, SplitDir::Horizontal),
+        LayoutPreset::EvenVertical => build_even_chain(panes, SplitDir::Vertical),
+        LayoutPreset::MainVertical => build_main_vertical(panes),
+        LayoutPreset::MainHorizontal => build_main_horizontal(panes),
+        LayoutPreset::Tiled => build_tiled(panes),
+    }
+}
+
+/// Build a chain of even splits in the given direction.
+/// For N panes, the first split gives 1/N to the first pane, then
+/// the second child recursively splits the remaining N-1 panes.
+fn build_even_chain(panes: &[PaneId], dir: SplitDir) -> LayoutNode {
+    if panes.len() == 1 {
+        return LayoutNode::Pane(panes[0]);
+    }
+    let n = panes.len() as f32;
+    let ratio = 1.0 / n;
+    LayoutNode::Split {
+        dir,
+        ratio,
+        first: Box::new(LayoutNode::Pane(panes[0])),
+        second: Box::new(build_even_chain(&panes[1..], dir)),
+    }
+}
+
+/// Main-vertical: first pane ~65% on left, remaining stacked vertically on right.
+fn build_main_vertical(panes: &[PaneId]) -> LayoutNode {
+    if panes.len() == 2 {
+        return LayoutNode::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.65,
+            first: Box::new(LayoutNode::Pane(panes[0])),
+            second: Box::new(LayoutNode::Pane(panes[1])),
+        };
+    }
+    LayoutNode::Split {
+        dir: SplitDir::Horizontal,
+        ratio: 0.65,
+        first: Box::new(LayoutNode::Pane(panes[0])),
+        second: Box::new(build_even_chain(&panes[1..], SplitDir::Vertical)),
+    }
+}
+
+/// Main-horizontal: first pane ~65% on top, remaining side by side on bottom.
+fn build_main_horizontal(panes: &[PaneId]) -> LayoutNode {
+    if panes.len() == 2 {
+        return LayoutNode::Split {
+            dir: SplitDir::Vertical,
+            ratio: 0.65,
+            first: Box::new(LayoutNode::Pane(panes[0])),
+            second: Box::new(LayoutNode::Pane(panes[1])),
+        };
+    }
+    LayoutNode::Split {
+        dir: SplitDir::Vertical,
+        ratio: 0.65,
+        first: Box::new(LayoutNode::Pane(panes[0])),
+        second: Box::new(build_even_chain(&panes[1..], SplitDir::Horizontal)),
+    }
+}
+
+/// Tiled (dwindle/spiral): each new pane splits the previous one,
+/// alternating horizontal and vertical — like Hyprland's dwindle layout.
+///
+/// 1: [A]
+/// 2: [A ][B ]           ← horizontal
+/// 3: [A ][B ]           ← B splits vertical
+///         [C ]
+/// 4: [A ][B ]           ← C splits horizontal
+///         [C][D]
+/// 5: [A ][B ]           ← D splits vertical
+///         [C][D]
+///              [E]
+fn build_tiled(panes: &[PaneId]) -> LayoutNode {
+    if panes.len() == 1 {
+        return LayoutNode::Pane(panes[0]);
+    }
+
+    // Start with first pane, then each subsequent pane splits the "last" region,
+    // alternating direction starting with horizontal.
+    let mut root = LayoutNode::Pane(panes[0]);
+    let mut last_pane = panes[0];
+
+    for (i, &new_pane) in panes.iter().enumerate().skip(1) {
+        // Alternate: even index (1st split) = horizontal, odd = vertical, etc.
+        let dir = if i % 2 == 1 {
+            SplitDir::Horizontal
+        } else {
+            SplitDir::Vertical
+        };
+        root.split(last_pane, new_pane, dir);
+        last_pane = new_pane;
+    }
+
+    root
 }
 
 /// A binary tree of splits, with panes at the leaves.
@@ -225,6 +334,76 @@ impl LayoutNode {
             LayoutNode::Split { first, second, .. } => {
                 first.contains_pane(target) || second.contains_pane(target)
             }
+        }
+    }
+
+    /// Adjust the split ratio of the split node whose border is at the given position.
+    /// `border_x`/`border_y` identify the border, `horizontal` its orientation,
+    /// and `delta` is the number of cells to shift (positive = right/down).
+    /// Returns true if a matching border was found and adjusted.
+    pub fn adjust_border_at(
+        &mut self,
+        area: Rect,
+        border_x: u16,
+        border_y: u16,
+        horizontal: bool,
+        delta: i16,
+    ) -> bool {
+        match self {
+            LayoutNode::Pane(_) => false,
+            LayoutNode::Split { dir, ratio, first, second } => {
+                match dir {
+                    SplitDir::Horizontal if !horizontal => {
+                        // Vertical border line at x = area.x + left_cols
+                        let left_cols = ((area.cols as f32) * *ratio) as u16;
+                        let bx = area.x + left_cols;
+                        if bx == border_x && border_y >= area.y && border_y < area.y + area.rows {
+                            // This is the border — adjust ratio
+                            let new_ratio = *ratio + (delta as f32 / area.cols as f32);
+                            *ratio = new_ratio.clamp(0.1, 0.9);
+                            return true;
+                        }
+                    }
+                    SplitDir::Vertical if horizontal => {
+                        // Horizontal border line at y = area.y + top_rows
+                        let top_rows = ((area.rows as f32) * *ratio) as u16;
+                        let by = area.y + top_rows;
+                        if by == border_y && border_x >= area.x && border_x < area.x + area.cols {
+                            let new_ratio = *ratio + (delta as f32 / area.rows as f32);
+                            *ratio = new_ratio.clamp(0.1, 0.9);
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Recurse into children
+                let (a, b) = split_area(area, *dir, *ratio);
+                if first.adjust_border_at(a, border_x, border_y, horizontal, delta) {
+                    return true;
+                }
+                second.adjust_border_at(b, border_x, border_y, horizontal, delta)
+            }
+        }
+    }
+
+    /// Swap two pane IDs in the layout tree.
+    pub fn swap_panes(&mut self, a: PaneId, b: PaneId) {
+        // First pass: rename a -> sentinel, second pass: b -> a, third: sentinel -> b
+        let sentinel = PaneId(u32::MAX);
+        self.rename_pane(a, sentinel);
+        self.rename_pane(b, a);
+        self.rename_pane(sentinel, b);
+    }
+
+    fn rename_pane(&mut self, from: PaneId, to: PaneId) {
+        match self {
+            LayoutNode::Pane(id) if *id == from => *id = to,
+            LayoutNode::Split { first, second, .. } => {
+                first.rename_pane(from, to);
+                second.rename_pane(from, to);
+            }
+            _ => {}
         }
     }
 

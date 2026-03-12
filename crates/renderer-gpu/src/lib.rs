@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use vtx_core::cell::{Attr, Cell, Color};
-use vtx_core::ipc::PaneRender;
+use vtx_core::ipc::{PaneRender, StyledStatus};
 use vtx_core::PaneId;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -468,7 +468,7 @@ impl GpuRenderer {
         panes: &[PaneRender],
         focused: PaneId,
         borders: &[(u16, u16, u16, bool)],
-        status: &str,
+        status: &StyledStatus,
         _total_rows: u16,
         prefix_active: bool,
         selection: Option<&Selection>,
@@ -542,30 +542,99 @@ impl GpuRenderer {
 
         // Status bar
         let status_y = rows.saturating_sub(1);
-        let prefix_indicator = if prefix_active { " [PREFIX]" } else { "" };
-        let time = utc_time();
-        let left = format!(" {status}{prefix_indicator}");
-        let right = format!(" {time} ");
-        let total_len = left.len() + right.len();
-        let padding = if (cols as usize) > total_len {
-            cols as usize - total_len
-        } else {
-            0
-        };
-        let full_status = format!("{left}{:padding$}{right}", "", padding = padding);
+        let gap_bg = Color::Rgb(status.bg.0, status.bg.1, status.bg.2);
 
-        let status_fg = Color::Rgb(180, 210, 255);
-        let status_bg = Color::Rgb(40, 40, 40);
-        for (i, ch) in full_status.chars().enumerate() {
-            if i >= cols as usize {
-                break;
-            }
-            self.set_back(i as u16, status_y, Cell {
-                c: ch,
-                fg: status_fg,
-                bg: status_bg,
+        // Fill entire status row with gap bg
+        for x in 0..cols {
+            self.set_back(x, status_y, Cell {
+                c: ' ',
+                fg: Color::Default,
+                bg: gap_bg,
                 attr: Attr::empty(),
             });
+        }
+
+        // Collect left segments, optionally appending a PREFIX indicator
+        let prefix_seg;
+        let left_segs: &[vtx_core::ipc::StatusSegment] = &status.left;
+        let mut left_with_prefix: Vec<&vtx_core::ipc::StatusSegment>;
+        let left_segs = if prefix_active {
+            prefix_seg = vtx_core::ipc::StatusSegment {
+                text: " [PREFIX] ".to_string(),
+                fg: (0x1a, 0x1b, 0x26),
+                bg: (0xe0, 0xaf, 0x68),
+                bold: true,
+                click: None,
+            };
+            left_with_prefix = left_segs.iter().collect();
+            left_with_prefix.push(&prefix_seg);
+            &left_with_prefix[..]
+        } else {
+            left_with_prefix = left_segs.iter().collect();
+            &left_with_prefix[..]
+        };
+
+        // Stamp left segments left-to-right
+        {
+            let mut col: u16 = 0;
+            for (i, seg) in left_segs.iter().enumerate() {
+                let seg_fg = Color::Rgb(seg.fg.0, seg.fg.1, seg.fg.2);
+                let seg_bg = Color::Rgb(seg.bg.0, seg.bg.1, seg.bg.2);
+                let seg_attr = if seg.bold { Attr::BOLD } else { Attr::empty() };
+                for ch in seg.text.chars() {
+                    if col >= cols { break; }
+                    self.set_back(col, status_y, Cell { c: ch, fg: seg_fg, bg: seg_bg, attr: seg_attr });
+                    col += 1;
+                }
+                if i + 1 < left_segs.len() {
+                    if col < cols {
+                        let next_bg = Color::Rgb(left_segs[i + 1].bg.0, left_segs[i + 1].bg.1, left_segs[i + 1].bg.2);
+                        self.set_back(col, status_y, Cell { c: '\u{e0b0}', fg: seg_bg, bg: next_bg, attr: Attr::empty() });
+                        col += 1;
+                    }
+                } else {
+                    if col < cols {
+                        self.set_back(col, status_y, Cell { c: '\u{e0b0}', fg: seg_bg, bg: gap_bg, attr: Attr::empty() });
+                        col += 1;
+                    }
+                }
+            }
+        }
+
+        // Stamp right segments
+        if !status.right.is_empty() {
+            let right_segs = &status.right;
+            let mut total_right_width: u16 = 1;
+            for (i, seg) in right_segs.iter().enumerate() {
+                total_right_width += seg.text.len() as u16;
+                if i + 1 < right_segs.len() {
+                    total_right_width += 1;
+                }
+            }
+            let start_col = cols.saturating_sub(total_right_width);
+            let mut col = start_col;
+            if col < cols {
+                let first_bg = Color::Rgb(right_segs[0].bg.0, right_segs[0].bg.1, right_segs[0].bg.2);
+                self.set_back(col, status_y, Cell { c: '\u{e0b2}', fg: first_bg, bg: gap_bg, attr: Attr::empty() });
+                col += 1;
+            }
+            for (i, seg) in right_segs.iter().enumerate() {
+                let seg_fg = Color::Rgb(seg.fg.0, seg.fg.1, seg.fg.2);
+                let seg_bg = Color::Rgb(seg.bg.0, seg.bg.1, seg.bg.2);
+                let seg_attr = if seg.bold { Attr::BOLD } else { Attr::empty() };
+                for ch in seg.text.chars() {
+                    if col >= cols { break; }
+                    self.set_back(col, status_y, Cell { c: ch, fg: seg_fg, bg: seg_bg, attr: seg_attr });
+                    col += 1;
+                }
+                if i + 1 < right_segs.len() {
+                    if col < cols {
+                        let next_bg = Color::Rgb(right_segs[i + 1].bg.0, right_segs[i + 1].bg.1, right_segs[i + 1].bg.2);
+                        self.set_back(col, status_y, Cell { c: '\u{e0b2}', fg: next_bg, bg: seg_bg, attr: Attr::empty() });
+                        col += 1;
+                    }
+                }
+            }
         }
 
         // Build instance data from the back buffer
@@ -706,16 +775,3 @@ impl Drop for GpuRenderer {
     }
 }
 
-// ── Utility ─────────────────────────────────────────────────────────────
-
-fn utc_time() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    format!("{h:02}:{m:02}:{s:02}")
-}

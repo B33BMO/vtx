@@ -12,6 +12,8 @@ pub enum HookEvent {
     Command,
     SessionCreate,
     SessionClose,
+    WindowCreate,
+    SessionDetach,
 }
 
 impl HookEvent {
@@ -26,6 +28,8 @@ impl HookEvent {
             "on_command" | "command" => Some(Self::Command),
             "on_session_create" | "session_create" => Some(Self::SessionCreate),
             "on_session_close" | "session_close" => Some(Self::SessionClose),
+            "on_window_create" | "window_create" => Some(Self::WindowCreate),
+            "on_session_detach" | "session_detach" => Some(Self::SessionDetach),
             _ => None,
         }
     }
@@ -41,6 +45,8 @@ impl HookEvent {
             Self::Command => "on_command",
             Self::SessionCreate => "on_session_create",
             Self::SessionClose => "on_session_close",
+            Self::WindowCreate => "on_window_create",
+            Self::SessionDetach => "on_session_detach",
         }
     }
 }

@@ -27,6 +27,8 @@ pub struct Pane {
     backend: PaneBackend,
     /// Whether the child process has exited (reader thread finished).
     pub dead: bool,
+    /// PID of the child process (for reading /proc/<pid>/cwd).
+    pub child_pid: Option<u32>,
 }
 
 impl Pane {
@@ -44,9 +46,10 @@ impl Pane {
         let mut cmd = CommandBuilder::new(shell);
         cmd.env("TERM", "xterm-256color");
 
-        pair.slave
+        let child = pair.slave
             .spawn_command(cmd)
             .map_err(|e| VtxError::Pty(e.to_string()))?;
+        let child_pid = child.process_id();
 
         drop(pair.slave);
 
@@ -90,18 +93,12 @@ impl Pane {
                 pty_rx,
             },
             dead: false,
+            child_pid,
         })
     }
 
-    /// Spawn a new pane running an SSH connection.
-    pub fn spawn_ssh(
-        id: PaneId,
-        cols: u16,
-        rows: u16,
-        host: &str,
-        user: Option<&str>,
-        port: Option<u16>,
-    ) -> Result<Self> {
+    /// Spawn a pane with a specific working directory.
+    pub fn spawn_in_cwd(id: PaneId, cols: u16, rows: u16, shell: &str, cwd: &str) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -112,21 +109,14 @@ impl Pane {
             })
             .map_err(|e| VtxError::Pty(e.to_string()))?;
 
-        let mut cmd = CommandBuilder::new("ssh");
-        if let Some(port) = port {
-            cmd.arg("-p");
-            cmd.arg(port.to_string());
-        }
-        let destination = match user {
-            Some(u) => format!("{u}@{host}"),
-            None => host.to_string(),
-        };
-        cmd.arg(destination);
+        let mut cmd = CommandBuilder::new(shell);
         cmd.env("TERM", "xterm-256color");
+        cmd.cwd(cwd);
 
-        pair.slave
+        let child = pair.slave
             .spawn_command(cmd)
             .map_err(|e| VtxError::Pty(e.to_string()))?;
+        let child_pid = child.process_id();
 
         drop(pair.slave);
 
@@ -167,6 +157,86 @@ impl Pane {
                 pty_rx,
             },
             dead: false,
+            child_pid,
+        })
+    }
+
+    /// Spawn a new pane running an SSH connection.
+    pub fn spawn_ssh(
+        id: PaneId,
+        cols: u16,
+        rows: u16,
+        host: &str,
+        user: Option<&str>,
+        port: Option<u16>,
+    ) -> Result<Self> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| VtxError::Pty(e.to_string()))?;
+
+        let mut cmd = CommandBuilder::new("ssh");
+        if let Some(port) = port {
+            cmd.arg("-p");
+            cmd.arg(port.to_string());
+        }
+        let destination = match user {
+            Some(u) => format!("{u}@{host}"),
+            None => host.to_string(),
+        };
+        cmd.arg(destination);
+        cmd.env("TERM", "xterm-256color");
+
+        let child = pair.slave
+            .spawn_command(cmd)
+            .map_err(|e| VtxError::Pty(e.to_string()))?;
+        let child_pid = child.process_id();
+
+        drop(pair.slave);
+
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| VtxError::Pty(e.to_string()))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| VtxError::Pty(e.to_string()))?;
+
+        let (pty_tx, pty_rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("vtx-pty-{}", id.0))
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if pty_tx.send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .map_err(|e| VtxError::Pty(e.to_string()))?;
+
+        Ok(Pane {
+            id,
+            parser: VtParser::new(cols, rows),
+            backend: PaneBackend::Pty {
+                master: pair.master,
+                writer,
+                pty_rx,
+            },
+            dead: false,
+            child_pid,
         })
     }
 
@@ -184,7 +254,15 @@ impl Pane {
                 rows,
             },
             dead: false,
+            child_pid: None,
         })
+    }
+
+    /// Read the current working directory of the child process via /proc.
+    pub fn read_cwd(&self) -> Option<String> {
+        let pid = self.child_pid?;
+        let link = format!("/proc/{}/cwd", pid);
+        std::fs::read_link(&link).ok().map(|p| p.to_string_lossy().into_owned())
     }
 
     /// Drain all pending PTY output and process it through the VT parser.

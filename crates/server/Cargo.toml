@@ -7,6 +7,7 @@ edition.workspace = true
 vtx-core = { workspace = true }
 vtx-terminal = { workspace = true }
 vtx-layout = { workspace = true }
+vtx-plugin = { path = "../plugin" }
 tokio = { workspace = true }
 portable-pty = { workspace = true }
 nix = { workspace = true }

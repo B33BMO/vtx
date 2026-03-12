@@ -122,6 +122,149 @@ impl WasmPlugin {
             )
             .map_err(|e| format!("linker error: {e}"))?;
 
+        // Host function: vtx_new_window(ptr, len) — name string (empty = no name)
+        linker
+            .func_wrap(
+                "env",
+                "vtx_new_window",
+                |mut caller: Caller<'_, PluginState>, ptr: i32, len: i32| {
+                    let name = if len > 0 {
+                        Some(read_wasm_string(&mut caller, ptr, len))
+                    } else {
+                        None
+                    };
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::NewWindow { name });
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_run_command(ptr, len) — command string
+        linker
+            .func_wrap(
+                "env",
+                "vtx_run_command",
+                |mut caller: Caller<'_, PluginState>, ptr: i32, len: i32| {
+                    let command = read_wasm_string(&mut caller, ptr, len);
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::RunCommand { command });
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_set_layout(ptr, len) — preset name string
+        linker
+            .func_wrap(
+                "env",
+                "vtx_set_layout",
+                |mut caller: Caller<'_, PluginState>, ptr: i32, len: i32| {
+                    let preset = read_wasm_string(&mut caller, ptr, len);
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::SetLayout { preset });
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_rename_window(ptr, len) — name string
+        linker
+            .func_wrap(
+                "env",
+                "vtx_rename_window",
+                |mut caller: Caller<'_, PluginState>, ptr: i32, len: i32| {
+                    let name = read_wasm_string(&mut caller, ptr, len);
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::RenameWindow { name });
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_zoom()
+        linker
+            .func_wrap(
+                "env",
+                "vtx_zoom",
+                |caller: Caller<'_, PluginState>| {
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::ZoomPane);
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_select_window(index)
+        linker
+            .func_wrap(
+                "env",
+                "vtx_select_window",
+                |caller: Caller<'_, PluginState>, index: i32| {
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::SelectWindow {
+                            index: index as usize,
+                        });
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_kill_pane()
+        linker
+            .func_wrap(
+                "env",
+                "vtx_kill_pane",
+                |caller: Caller<'_, PluginState>| {
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::KillPane);
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
+        // Host function: vtx_popup(ptr, len) — command string (empty = no command)
+        linker
+            .func_wrap(
+                "env",
+                "vtx_popup",
+                |mut caller: Caller<'_, PluginState>, ptr: i32, len: i32| {
+                    let command = if len > 0 {
+                        Some(read_wasm_string(&mut caller, ptr, len))
+                    } else {
+                        None
+                    };
+                    caller
+                        .data()
+                        .actions
+                        .lock()
+                        .unwrap()
+                        .push(PluginAction::Popup { command });
+                },
+            )
+            .map_err(|e| format!("linker error: {e}"))?;
+
         let instance = linker
             .instantiate(&mut store, &module)
             .map_err(|e| format!("failed to instantiate WASM module '{name}': {e}"))?;

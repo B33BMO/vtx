@@ -3,9 +3,14 @@ name = "vtx-client"
 version.workspace = true
 edition.workspace = true
 
+[features]
+gpu = ["dep:vtx-renderer-gpu", "dep:winit"]
+
 [dependencies]
 vtx-core = { workspace = true }
 vtx-renderer-tty = { workspace = true }
+vtx-renderer-gpu = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }
 tokio = { workspace = true }
 crossterm = { workspace = true }
 tracing = { workspace = true }
