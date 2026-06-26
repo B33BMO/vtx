@@ -2,14 +2,17 @@
 
 use std::time::{Duration, Instant};
 use vtx_core::animation::{ease, Easing};
-use vtx_core::PaneId;
+use vtx_core::{PaneId, SessionId};
 use vtx_layout::Rect;
 
 /// What an animation drives.
 #[derive(Debug, Clone)]
 pub enum AnimationKind {
     /// A pane shrinking to nothing before removal: interpolate its rect to `to`.
-    PaneClose { pane: PaneId, from: Rect, to: Rect },
+    ///
+    /// `PaneId` is allocated per-session, so the same value can exist in
+    /// multiple sessions; the `session` field scopes the animation.
+    PaneClose { session: SessionId, pane: PaneId, from: Rect, to: Rect },
 }
 
 /// A single in-flight animation.
@@ -52,10 +55,13 @@ impl AnimationRegistry {
         done
     }
 
-    /// Current interpolated rect for `pane`, if a PaneClose animation targets it.
-    pub fn pane_rect(&self, pane: PaneId, now: Instant) -> Option<Rect> {
+    /// Current interpolated rect for `pane` in `session`, if a PaneClose
+    /// animation targets it.
+    pub fn pane_rect(&self, session: SessionId, pane: PaneId, now: Instant) -> Option<Rect> {
         self.items.iter().find_map(|a| match &a.kind {
-            AnimationKind::PaneClose { pane: p, from, to } if *p == pane => {
+            AnimationKind::PaneClose { session: s, pane: p, from, to }
+                if *s == session && *p == pane =>
+            {
                 let raw = (now.duration_since(a.start).as_secs_f32()
                     / a.duration.as_secs_f32())
                 .clamp(0.0, 1.0);
@@ -78,20 +84,24 @@ mod tests {
     fn pane_rect_interpolates_then_prunes_on_completion() {
         let mut reg = AnimationRegistry::default();
         let t0 = Instant::now();
+        let sid = SessionId(7);
         reg.push(
-            AnimationKind::PaneClose { pane: PaneId(1), from: rect(100, 40), to: rect(0, 0) },
+            AnimationKind::PaneClose { session: sid, pane: PaneId(1), from: rect(100, 40), to: rect(0, 0) },
             t0,
             Duration::from_millis(100),
             Easing::Linear,
         );
 
-        let mid = reg.pane_rect(PaneId(1), t0 + Duration::from_millis(50)).unwrap();
+        let mid = reg.pane_rect(sid, PaneId(1), t0 + Duration::from_millis(50)).unwrap();
         assert!(mid.cols > 0 && mid.cols < 100, "got {}", mid.cols);
         assert!(!reg.is_empty());
+
+        // Same PaneId in a different session must not match.
+        assert!(reg.pane_rect(SessionId(8), PaneId(1), t0 + Duration::from_millis(50)).is_none());
 
         let done = reg.prune(t0 + Duration::from_millis(101));
         assert_eq!(done.len(), 1);
         assert!(reg.is_empty());
-        assert!(reg.pane_rect(PaneId(1), t0 + Duration::from_millis(101)).is_none());
+        assert!(reg.pane_rect(sid, PaneId(1), t0 + Duration::from_millis(101)).is_none());
     }
 }

@@ -21,6 +21,7 @@ pub struct Config {
     /// Structured status bar configuration
     pub status_bar: lua_config::StatusBarConfig,
     /// Animation settings
+    #[serde(default)]
     pub animations: lua_config::AnimationConfig,
 }
 

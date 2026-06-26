@@ -115,16 +115,18 @@ impl VtxServer {
                 let drained = drain_all_sessions(&mut st);
                 let now = std::time::Instant::now();
                 let done = st.animations.prune(now);
-                for kind in done {
-                    let crate::animation::AnimationKind::PaneClose { pane, .. } = kind;
-                    for session in st.sessions.values_mut() {
-                        for window in session.windows.iter_mut() {
-                            window.panes.remove(&pane);
+                for kind in &done {
+                    let crate::animation::AnimationKind::PaneClose { session, pane, .. } = kind;
+                    // PaneId is per-session: only remove the pane from the
+                    // session that owns this animation.
+                    if let Some(s) = st.sessions.get_mut(session) {
+                        for w in s.windows.iter_mut() {
+                            w.panes.remove(pane);
                         }
                     }
                 }
                 let animating = !st.animations.is_empty();
-                if drained || animating {
+                if drained || animating || !done.is_empty() {
                     st.frame_tx.send_modify(|v| *v = v.wrapping_add(1));
                 }
             }
@@ -470,17 +472,23 @@ fn handle_message(
                     let area = Rect { x: 0, y: 0, cols: cs.cols, rows: pane_rows };
 
                     // Identify the target pane and its current rect (the anim `from`).
-                    let (target, from_rect, has_others) = {
+                    // `has_others` and the refocus candidate are based on panes
+                    // still resident in the LAYOUT, not win.panes: when animating,
+                    // the dying pane is kept in win.panes (so it keeps drawing
+                    // while it shrinks), so win.panes over-counts.
+                    let (target, from_rect, has_others, live) = {
                         let session = st.sessions.get(&sid).unwrap();
                         let win = session.active_window();
                         let target = win.focused_pane;
+                        let live: Vec<PaneId> = win.layout.pane_ids();
                         let from = win
                             .layout
                             .resolve(area)
                             .into_iter()
                             .find(|(pid, _)| *pid == target)
                             .map(|(_, r)| r);
-                        (target, from, win.panes.len() > 1)
+                        let has_others = live.iter().any(|p| *p != target);
+                        (target, from, has_others, live)
                     };
 
                     // Animated close: shrink the pane to nothing while the rest
@@ -497,9 +505,9 @@ fn handle_message(
                                 rows: 0,
                             };
                             st.animations.push(
-                                crate::animation::AnimationKind::PaneClose { pane: target, from, to },
+                                crate::animation::AnimationKind::PaneClose { session: sid, pane: target, from, to },
                                 std::time::Instant::now(),
-                                std::time::Duration::from_millis(st.config.animations.duration_ms),
+                                std::time::Duration::from_millis(st.config.animations.duration_ms.max(1)),
                                 st.config.animations.easing,
                             );
 
@@ -520,7 +528,9 @@ fn handle_message(
                             // shrinks. The drain tick removes it (and reaps its
                             // child) once the animation completes.
                             win.layout.remove(target);
-                            if let Some(first) = win.panes.keys().find(|p| **p != target).copied() {
+                            // Refocus a pane that is still in the layout (not just
+                            // win.panes, which still contains the dying pane).
+                            if let Some(first) = live.iter().find(|p| **p != target).copied() {
                                 win.focused_pane = first;
                             }
                             // Reflow the surviving panes into the reclaimed space.
@@ -531,7 +541,14 @@ fn handle_message(
                                     let _ = pane.resize(rect.cols, rect.rows);
                                 }
                             }
-                            return build_render_msg(session, cs.cols, cs.rows, &st.config.status_bar);
+                            // Re-fetch as a shared borrow so we can pass the
+                            // animation registry; this makes the first frame
+                            // already show the pane at near-full size.
+                            let session = match st.sessions.get(&sid) {
+                                Some(s) => s,
+                                None => return ServerMsg::Detached,
+                            };
+                            return build_render_msg_scrolled(session, cs.cols, cs.rows, 0, &st.config.status_bar, Some(&st.animations));
                         }
                     }
 
@@ -1586,7 +1603,7 @@ fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scro
     if let Some(anim) = anim {
         let now = std::time::Instant::now();
         for (pid, pane) in win.panes.iter() {
-            if let Some(r) = anim.pane_rect(*pid, now) {
+            if let Some(r) = anim.pane_rect(session.id, *pid, now) {
                 if r.cols == 0 || r.rows == 0 {
                     continue;
                 }
