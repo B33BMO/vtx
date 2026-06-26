@@ -1,3 +1,4 @@
+mod animation;
 pub mod pane;
 pub mod session;
 pub mod server;
