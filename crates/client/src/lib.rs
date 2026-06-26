@@ -1,4 +1,5 @@
 pub mod client;
+mod composer;
 
 #[cfg(feature = "gpu")]
 pub mod gpu_attach;
