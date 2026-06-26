@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod cell;
 pub mod config;
 pub mod error;
