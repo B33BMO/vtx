@@ -1775,4 +1775,31 @@ mod tests {
         let mut state = ServerState::new(Config::default());
         assert!(!drain_all_sessions(&mut state));
     }
+
+    /// H1 (part 2): a session with a pane that produced output gets drained by
+    /// `drain_all_sessions` even with no client attached.
+    #[test]
+    fn drain_all_sessions_drains_a_detached_session() {
+        use std::time::{Duration, Instant};
+        let mut state = ServerState::new(Config::default());
+
+        // --- construct a session with one pane running "/bin/echo" ---
+        // (mirrors how NewSession builds session/window/pane)
+        let pane = crate::pane::Pane::spawn(PaneId(1), 40, 10, "/bin/echo")
+            .expect("spawn echo pane");
+        let session = Session::new(SessionId(1), "detached".to_string(), pane);
+        state.sessions.insert(SessionId(1), session);
+
+        // Poll the drain for up to 1s for the echo output to arrive.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut drained = false;
+        while Instant::now() < deadline {
+            if drain_all_sessions(&mut state) {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(drained, "echo output should have been drained");
+    }
 }
