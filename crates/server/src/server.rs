@@ -13,6 +13,7 @@ use vtx_layout::Rect;
 use vtx_plugin::PluginManager;
 use vtx_plugin::hooks::{HookContext, HookEvent};
 
+use crate::animation::AnimationRegistry;
 use crate::pane::Pane;
 use crate::session::Session;
 
@@ -35,6 +36,8 @@ struct ServerState {
     /// Frame counter bumped whenever any session drains new output. Clients
     /// subscribe and re-render their attached session when it changes.
     frame_tx: watch::Sender<u64>,
+    /// In-flight animations, advanced by the drain tick.
+    animations: AnimationRegistry,
 }
 
 impl ServerState {
@@ -51,6 +54,7 @@ impl ServerState {
             plugins,
             active_theme: "Tokyo Night".to_string(),
             frame_tx,
+            animations: AnimationRegistry::default(),
         }
     }
 }
@@ -108,7 +112,11 @@ impl VtxServer {
             loop {
                 interval.tick().await;
                 let mut st = drain_state.lock().await;
-                if drain_all_sessions(&mut st) {
+                let drained = drain_all_sessions(&mut st);
+                let now = std::time::Instant::now();
+                let _done = st.animations.prune(now);
+                let animating = !st.animations.is_empty();
+                if drained || animating {
                     st.frame_tx.send_modify(|v| *v = v.wrapping_add(1));
                 }
             }
