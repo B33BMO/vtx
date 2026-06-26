@@ -147,6 +147,21 @@ impl Rect {
             self.y as i32 + self.rows as i32 / 2,
         )
     }
+
+    /// Linearly interpolate between two rects at progress `t` in `[0,1]`.
+    /// Rounds to the nearest cell. Used for geometry animations.
+    pub fn lerp(from: Rect, to: Rect, t: f32) -> Rect {
+        let t = t.clamp(0.0, 1.0);
+        let mix = |a: u16, b: u16| -> u16 {
+            (a as f32 + (b as f32 - a as f32) * t).round() as u16
+        };
+        Rect {
+            x: mix(from.x, to.x),
+            y: mix(from.y, to.y),
+            cols: mix(from.cols, to.cols),
+            rows: mix(from.rows, to.rows),
+        }
+    }
 }
 
 /// Info about a border segment to draw.
@@ -495,5 +510,20 @@ fn split_area(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
             };
             (a, b)
         }
+    }
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::*;
+
+    #[test]
+    fn lerp_endpoints_and_midpoint() {
+        let a = Rect { x: 0, y: 0, cols: 100, rows: 40 };
+        let b = Rect { x: 10, y: 20, cols: 0, rows: 0 };
+        assert_eq!(Rect::lerp(a, b, 0.0).cols, 100);
+        assert_eq!(Rect::lerp(a, b, 1.0).cols, 0);
+        let mid = Rect::lerp(a, b, 0.5);
+        assert_eq!((mid.x, mid.y, mid.cols, mid.rows), (5, 10, 50, 20));
     }
 }
