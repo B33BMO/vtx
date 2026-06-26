@@ -369,8 +369,11 @@ fn handle_message(
 
             if let Some(sid) = cs.attached_session {
                 if let Some(session) = st.sessions.get_mut(&sid) {
-                    // Recalculate layout and resize each pane to its rect
-                    let pane_area_rows = rows.saturating_sub(1); // status bar
+                    // Recalculate layout and resize each pane to its rect.
+                    // Reserve a row for the composer when enabled so the PTY size
+                    // matches the visible pane area.
+                    let reserve = if session.composer_enabled { 1 } else { 0 };
+                    let pane_area_rows = rows.saturating_sub(1).saturating_sub(reserve); // status bar + composer
                     let rects = session.resolve_layout(cols, pane_area_rows);
                     let win = session.active_window_mut();
                     for (pid, rect) in &rects {
@@ -745,6 +748,15 @@ fn handle_message(
             if let Some(sid) = cs.attached_session {
                 if let Some(session) = st.sessions.get_mut(&sid) {
                     session.composer_enabled = !session.composer_enabled;
+                    let reserve = if session.composer_enabled { 1 } else { 0 };
+                    let pane_area_rows = cs.rows.saturating_sub(1).saturating_sub(reserve);
+                    let rects = session.resolve_layout(cs.cols, pane_area_rows);
+                    let win = session.active_window_mut();
+                    for (pid, rect) in &rects {
+                        if let Some(pane) = win.panes.get_mut(pid) {
+                            let _ = pane.resize(rect.cols, rect.rows);
+                        }
+                    }
                     return build_render_msg(session, cs.cols, cs.rows, &st.config.status_bar);
                 }
             }
@@ -1507,11 +1519,11 @@ fn build_render_msg(session: &Session, cols: u16, total_rows: u16, status_cfg: &
 }
 
 fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scroll_offset: i32, status_cfg: &vtx_core::lua_config::StatusBarConfig, anim: Option<&AnimationRegistry>) -> ServerMsg {
-    let pane_area_rows = total_rows.saturating_sub(1);
-
-    // Composer: active when enabled for the session AND the focused pane is not
-    // a full-screen (alt-screen) app. When active, reserve one row above the
-    // status bar for the composer line.
+    // Composer: the row is RESERVED (shrinking the pane area / PTY) whenever the
+    // composer is enabled for the session, so the reservation stays stable across
+    // alt-screen transitions and the PTY sizing matches the layout. The DISPLAY of
+    // the composer is keyed on `composer_active` (enabled AND the focused pane is
+    // not a full-screen alt-screen app) so the row stays blank under alt-screen.
     let composer_focused = session.active_window().focused_pane;
     let focused_alt = session
         .active_window()
@@ -1520,15 +1532,12 @@ fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scro
         .map(|p| p.parser.grid.using_alt_screen)
         .unwrap_or(false);
     let composer_active = session.composer_enabled && !focused_alt;
+    let reserve = if session.composer_enabled { 1 } else { 0 };
+    let pane_area_rows = total_rows.saturating_sub(1).saturating_sub(reserve);
     let composer_row = if composer_active && total_rows >= 2 {
         Some(total_rows - 2)
     } else {
         None
-    };
-    let pane_area_rows = if composer_active {
-        pane_area_rows.saturating_sub(1)
-    } else {
-        pane_area_rows
     };
 
     let offset = scroll_offset.max(0) as usize;

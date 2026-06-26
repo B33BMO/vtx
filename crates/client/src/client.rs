@@ -107,6 +107,9 @@ impl VtxClient {
         let composer_prompt: String = self.composer_prompt.clone();
         let mut composer = crate::composer::ComposerBuffer::default();
         let mut composer_row: Option<u16> = None;
+        // Track the previous composer row so we can force a full redraw when the
+        // composer turns off (Some -> None), clearing its ghost text.
+        let mut prev_composer_row: Option<u16> = None;
 
         // Search mode state
         let mut search_mode = false;
@@ -244,6 +247,12 @@ impl VtxClient {
                     match result {
                         Some(ServerMsg::Render { panes, focused, borders, status, total_rows, composer_row: cr }) => {
                             composer_row = cr;
+                            // When the composer turns off, force a full redraw so its
+                            // stdout-drawn text doesn't linger in the diff buffer.
+                            if prev_composer_row.is_some() && cr.is_none() {
+                                renderer.invalidate();
+                            }
+                            prev_composer_row = cr;
                             let status_display = if search_mode {
                                 StyledStatus::simple(
                                     &format!("search: {}_", search_query),
@@ -1101,38 +1110,52 @@ impl VtxClient {
                                 && !(key_event.code == KeyCode::Char(key_config.prefix_key)
                                     && key_event.modifiers.contains(KeyModifiers::CONTROL))
                             {
-                                match key_event.code {
+                                // Only keys the composer actually consumes are
+                                // swallowed; everything else (Ctrl+C/D/Z, Alt-nav,
+                                // Alt+digit, Shift+PageUp, ...) falls through to the
+                                // normal process_key path below.
+                                let handled = match key_event.code {
                                     KeyCode::Char(c)
                                         if key_event.modifiers.is_empty()
                                             || key_event.modifiers == KeyModifiers::SHIFT =>
                                     {
-                                        composer.insert(c)
+                                        composer.insert(c);
+                                        true
                                     }
-                                    KeyCode::Backspace => composer.backspace(),
-                                    KeyCode::Delete => composer.delete(),
-                                    KeyCode::Left => composer.left(),
-                                    KeyCode::Right => composer.right(),
-                                    KeyCode::Home => composer.home(),
-                                    KeyCode::End => composer.end(),
-                                    KeyCode::Up => composer.history_prev(),
-                                    KeyCode::Down => composer.history_next(),
+                                    KeyCode::Backspace => { composer.backspace(); true }
+                                    KeyCode::Delete => { composer.delete(); true }
+                                    KeyCode::Left => { composer.left(); true }
+                                    KeyCode::Right => { composer.right(); true }
+                                    KeyCode::Home => { composer.home(); true }
+                                    KeyCode::End => { composer.end(); true }
+                                    KeyCode::Up => { composer.history_prev(); true }
+                                    KeyCode::Down => { composer.history_next(); true }
                                     KeyCode::Enter => {
                                         if let Some(line) = composer.take_line() {
                                             let mut data = line.into_bytes();
                                             data.push(b'\n');
                                             send_msg(&mut writer, &ClientMsg::Input { data }).await?;
+                                            // FIX 4: snap scrollback to bottom on submit
+                                            scroll_offset = 0;
+                                            send_msg(&mut writer, &ClientMsg::ScrollBack { offset: 0 }).await?;
                                         }
+                                        true
                                     }
                                     KeyCode::Esc => {
                                         send_msg(&mut writer, &ClientMsg::ToggleComposer).await?;
+                                        true
                                     }
-                                    _ => {}
+                                    _ => false,
+                                };
+                                if handled {
+                                    if let Some(row) = composer_row {
+                                        let _ = renderer.render_composer(row, &composer_prompt, &composer.text(), composer.cursor());
+                                    }
+                                    // Key was consumed by the composer; skip raw input.
+                                    continue;
                                 }
-                                if let Some(row) = composer_row {
-                                    let _ = renderer.render_composer(row, &composer_prompt, &composer.text(), composer.cursor());
-                                }
-                                // Key was consumed by the composer; skip raw input.
-                                continue;
+                                // Not handled -> fall through to the normal process_key
+                                // path so the shell still receives Ctrl+C, Alt-nav, etc.
                             }
 
                             // If scrolled and user types normal input, snap back to bottom
