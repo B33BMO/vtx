@@ -114,7 +114,15 @@ impl VtxServer {
                 let mut st = drain_state.lock().await;
                 let drained = drain_all_sessions(&mut st);
                 let now = std::time::Instant::now();
-                let _done = st.animations.prune(now);
+                let done = st.animations.prune(now);
+                for kind in done {
+                    let crate::animation::AnimationKind::PaneClose { pane, .. } = kind;
+                    for session in st.sessions.values_mut() {
+                        for window in session.windows.iter_mut() {
+                            window.panes.remove(&pane);
+                        }
+                    }
+                }
                 let animating = !st.animations.is_empty();
                 if drained || animating {
                     st.frame_tx.send_modify(|v| *v = v.wrapping_add(1));
@@ -203,7 +211,7 @@ async fn handle_client(
                     let json = {
                         let st = state.lock().await;
                         st.sessions.get(&sid).map(|session| {
-                            let msg = build_render_msg_scrolled(session, cs.cols, cs.rows, cs.scroll_offset, &st.config.status_bar);
+                            let msg = build_render_msg_scrolled(session, cs.cols, cs.rows, cs.scroll_offset, &st.config.status_bar, Some(&st.animations));
                             let mut json = serde_json::to_string(&msg).unwrap();
                             json.push('\n');
                             json
@@ -457,8 +465,78 @@ fn handle_message(
         }
         ClientMsg::KillPane => {
             if let Some(sid) = cs.attached_session {
-                if let Some(session) = st.sessions.get_mut(&sid) {
-                    let target = session.active_window().focused_pane;
+                if st.sessions.contains_key(&sid) {
+                    let pane_rows = cs.rows.saturating_sub(1);
+                    let area = Rect { x: 0, y: 0, cols: cs.cols, rows: pane_rows };
+
+                    // Identify the target pane and its current rect (the anim `from`).
+                    let (target, from_rect, has_others) = {
+                        let session = st.sessions.get(&sid).unwrap();
+                        let win = session.active_window();
+                        let target = win.focused_pane;
+                        let from = win
+                            .layout
+                            .resolve(area)
+                            .into_iter()
+                            .find(|(pid, _)| *pid == target)
+                            .map(|(_, r)| r);
+                        (target, from, win.panes.len() > 1)
+                    };
+
+                    // Animated close: shrink the pane to nothing while the rest
+                    // reflow. Only when there are other panes to reflow into and
+                    // we know the pane's current rect; otherwise fall through to
+                    // the immediate path (which also handles window/session
+                    // teardown when the last pane is killed).
+                    if st.config.animations.enabled && has_others {
+                        if let Some(from) = from_rect {
+                            let to = Rect {
+                                x: from.x + from.cols / 2,
+                                y: from.y + from.rows / 2,
+                                cols: 0,
+                                rows: 0,
+                            };
+                            st.animations.push(
+                                crate::animation::AnimationKind::PaneClose { pane: target, from, to },
+                                std::time::Instant::now(),
+                                std::time::Duration::from_millis(st.config.animations.duration_ms),
+                                st.config.animations.easing,
+                            );
+
+                            let actions = st.plugins.dispatch_hook(HookEvent::PaneClose, &HookContext {
+                                pane_id: Some(target.0),
+                                session_id: Some(sid.0),
+                                ..Default::default()
+                            });
+                            process_plugin_actions(st, cs, actions);
+
+                            let session = match st.sessions.get_mut(&sid) {
+                                Some(s) => s,
+                                None => return ServerMsg::Detached,
+                            };
+                            let win = session.active_window_mut();
+                            // Collapse the split in the layout tree, but KEEP the
+                            // pane in win.panes so it keeps drawing while it
+                            // shrinks. The drain tick removes it (and reaps its
+                            // child) once the animation completes.
+                            win.layout.remove(target);
+                            if let Some(first) = win.panes.keys().find(|p| **p != target).copied() {
+                                win.focused_pane = first;
+                            }
+                            // Reflow the surviving panes into the reclaimed space.
+                            let rects = session.resolve_layout(cs.cols, pane_rows);
+                            let win = session.active_window_mut();
+                            for (pid, rect) in &rects {
+                                if let Some(pane) = win.panes.get_mut(pid) {
+                                    let _ = pane.resize(rect.cols, rect.rows);
+                                }
+                            }
+                            return build_render_msg(session, cs.cols, cs.rows, &st.config.status_bar);
+                        }
+                    }
+
+                    // Immediate close (animations disabled, or last pane).
+                    let session = st.sessions.get_mut(&sid).unwrap();
                     let win = session.active_window_mut();
                     win.panes.remove(&target);
 
@@ -502,7 +580,6 @@ fn handle_message(
                     win.focused_pane = first;
 
                     // Resize remaining panes to fill the space
-                    let pane_rows = cs.rows.saturating_sub(1);
                     let rects = session.resolve_layout(cs.cols, pane_rows);
                     let win = session.active_window_mut();
                     for (pid, rect) in &rects {
@@ -612,7 +689,7 @@ fn handle_message(
             cs.scroll_offset = offset;
             if let Some(sid) = cs.attached_session {
                 if let Some(session) = st.sessions.get(&sid) {
-                    return build_render_msg_scrolled(session, cs.cols, cs.rows, offset, &st.config.status_bar);
+                    return build_render_msg_scrolled(session, cs.cols, cs.rows, offset, &st.config.status_bar, None);
                 }
             }
             ServerMsg::Error { msg: "No session attached".into() }
@@ -1398,10 +1475,10 @@ fn list_saved_sessions() -> std::result::Result<Vec<String>, String> {
 }
 
 fn build_render_msg(session: &Session, cols: u16, total_rows: u16, status_cfg: &vtx_core::lua_config::StatusBarConfig) -> ServerMsg {
-    build_render_msg_scrolled(session, cols, total_rows, 0, status_cfg)
+    build_render_msg_scrolled(session, cols, total_rows, 0, status_cfg, None)
 }
 
-fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scroll_offset: i32, status_cfg: &vtx_core::lua_config::StatusBarConfig) -> ServerMsg {
+fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scroll_offset: i32, status_cfg: &vtx_core::lua_config::StatusBarConfig, anim: Option<&AnimationRegistry>) -> ServerMsg {
     let pane_area_rows = total_rows.saturating_sub(1);
     let offset = scroll_offset.max(0) as usize;
     let win = session.active_window();
@@ -1500,6 +1577,32 @@ fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scro
                 cursor_visible: pane.parser.grid.cursor_visible,
                 floating: true,
             });
+        }
+    }
+
+    // Inject panes that are mid-close animation. These were removed from
+    // win.layout (so they're absent from `rects`) but kept in win.panes so we
+    // can keep drawing them shrinking toward nothing.
+    if let Some(anim) = anim {
+        let now = std::time::Instant::now();
+        for (pid, pane) in win.panes.iter() {
+            if let Some(r) = anim.pane_rect(*pid, now) {
+                if r.cols == 0 || r.rows == 0 {
+                    continue;
+                }
+                panes.push(PaneRender {
+                    id: *pid,
+                    x: r.x,
+                    y: r.y,
+                    cols: r.cols,
+                    rows: r.rows,
+                    content: pane.parser.grid.content_cells(),
+                    cursor_x: 0,
+                    cursor_y: 0,
+                    cursor_visible: false,
+                    floating: true,
+                });
+            }
         }
     }
 

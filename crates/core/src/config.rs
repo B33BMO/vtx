@@ -20,6 +20,8 @@ pub struct Config {
     pub bindings: Vec<KeyBinding>,
     /// Structured status bar configuration
     pub status_bar: lua_config::StatusBarConfig,
+    /// Animation settings
+    pub animations: lua_config::AnimationConfig,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             status_fg: lua_cfg.status_fg.as_tuple(),
             bindings: lua_cfg.bindings,
             status_bar: lua_cfg.status_bar,
+            animations: lua_cfg.animations,
         }
     }
 }
@@ -50,6 +53,7 @@ impl Config {
         self.status_fg = lua_cfg.status_fg.as_tuple();
         self.bindings = lua_cfg.bindings;
         self.status_bar = lua_cfg.status_bar;
+        self.animations = lua_cfg.animations;
     }
 }
 

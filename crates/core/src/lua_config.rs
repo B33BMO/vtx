@@ -101,7 +101,7 @@ impl Default for StatusBarConfig {
 }
 
 /// Animation settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnimationConfig {
     pub enabled: bool,
     pub duration_ms: u64,

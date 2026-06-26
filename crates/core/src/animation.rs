@@ -2,7 +2,7 @@
 //! `[0,1]`; the return value is the eased progress, also in `[0,1]`.
 
 /// Easing curve, selectable from config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Easing {
     Linear,
     EaseOut,
