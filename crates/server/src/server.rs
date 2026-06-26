@@ -293,7 +293,8 @@ fn handle_message(
 
             match Pane::spawn(pane_id, cs.cols, pane_rows, &st.config.default_shell) {
                 Ok(pane) => {
-                    let session = Session::new(sid, session_name, pane);
+                    let mut session = Session::new(sid, session_name, pane);
+                    session.composer_enabled = st.config.composer.enabled;
                     st.sessions.insert(sid, session);
                     cs.attached_session = Some(sid);
                     info!("Created session {sid}");
@@ -1468,6 +1469,7 @@ fn restore_session_from_disk(
         session.active_window = saved.active_window;
     }
 
+    session.composer_enabled = st.config.composer.enabled;
     st.sessions.insert(sid, session);
     cs.attached_session = Some(sid);
     info!("Restored session '{}' as {sid}", saved.name);

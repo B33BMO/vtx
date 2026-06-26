@@ -26,6 +26,7 @@ pub struct Session {
     pub active_window: usize,
     next_pane_id: u32,
     pub created: u64,
+    pub composer_enabled: bool,
 }
 
 impl Session {
@@ -56,6 +57,7 @@ impl Session {
             active_window: 0,
             next_pane_id: pane_id.0 + 1,
             created: now,
+            composer_enabled: false,
         }
     }
 
