@@ -100,7 +100,8 @@ impl VtxServer {
 
         // Server-owned drain tick: drains all sessions ~125x/sec regardless of
         // attached clients (fixes the detached-session memory leak) and bumps
-        // the frame counter so attached clients re-render.
+        // the frame counter so attached clients re-render. Costs one
+        // uncontended lock acquisition every 8ms even when idle — acceptable.
         let drain_state = Arc::clone(&self.state);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(8));
