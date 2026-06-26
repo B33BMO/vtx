@@ -40,6 +40,8 @@ pub struct VtxClient {
     /// Status bar colors
     pub status_bg: (u8, u8, u8),
     pub status_fg: (u8, u8, u8),
+    /// IRC composer prompt string
+    composer_prompt: String,
 }
 
 impl VtxClient {
@@ -57,6 +59,7 @@ impl VtxClient {
             bindings: config.bindings.clone(),
             status_bg: config.status_bg,
             status_fg: config.status_fg,
+            composer_prompt: config.composer.prompt.clone(),
         }
     }
 
@@ -99,6 +102,11 @@ impl VtxClient {
         };
         let mut prefix_active = false;
         let mut scroll_offset: i32 = 0;
+
+        // IRC composer state
+        let composer_prompt: String = self.composer_prompt.clone();
+        let mut composer = crate::composer::ComposerBuffer::default();
+        let mut composer_row: Option<u16> = None;
 
         // Search mode state
         let mut search_mode = false;
@@ -234,7 +242,8 @@ impl VtxClient {
                 // Server messages (from dedicated reader task)
                 result = server_msg_rx.recv() => {
                     match result {
-                        Some(ServerMsg::Render { panes, focused, borders, status, total_rows, composer_row: _ }) => {
+                        Some(ServerMsg::Render { panes, focused, borders, status, total_rows, composer_row: cr }) => {
+                            composer_row = cr;
                             let status_display = if search_mode {
                                 StyledStatus::simple(
                                     &format!("search: {}_", search_query),
@@ -283,6 +292,10 @@ impl VtxClient {
                                 let _ = renderer.render_settings_menu(
                                     &settings_themes, settings_menu_selected, &settings_active_theme,
                                 );
+                            }
+                            // If the composer is active, draw it on top of the frame
+                            if let Some(row) = composer_row {
+                                let _ = renderer.render_composer(row, &composer_prompt, &composer.text(), composer.cursor());
                             }
                         }
                         Some(ServerMsg::SearchResult { offset, matches }) => {
@@ -1077,6 +1090,51 @@ impl VtxClient {
                                 }
                             }
 
+                            // === IRC composer: route keys into the local buffer ===
+                            // Active only when the server says so and we are not in
+                            // copy/search mode and the prefix is not pending. The prefix
+                            // key itself is excluded so prefix activation still works.
+                            if composer_row.is_some()
+                                && !copy_mode
+                                && !search_mode
+                                && !prefix_active
+                                && !(key_event.code == KeyCode::Char(key_config.prefix_key)
+                                    && key_event.modifiers.contains(KeyModifiers::CONTROL))
+                            {
+                                match key_event.code {
+                                    KeyCode::Char(c)
+                                        if key_event.modifiers.is_empty()
+                                            || key_event.modifiers == KeyModifiers::SHIFT =>
+                                    {
+                                        composer.insert(c)
+                                    }
+                                    KeyCode::Backspace => composer.backspace(),
+                                    KeyCode::Delete => composer.delete(),
+                                    KeyCode::Left => composer.left(),
+                                    KeyCode::Right => composer.right(),
+                                    KeyCode::Home => composer.home(),
+                                    KeyCode::End => composer.end(),
+                                    KeyCode::Up => composer.history_prev(),
+                                    KeyCode::Down => composer.history_next(),
+                                    KeyCode::Enter => {
+                                        if let Some(line) = composer.take_line() {
+                                            let mut data = line.into_bytes();
+                                            data.push(b'\n');
+                                            send_msg(&mut writer, &ClientMsg::Input { data }).await?;
+                                        }
+                                    }
+                                    KeyCode::Esc => {
+                                        send_msg(&mut writer, &ClientMsg::ToggleComposer).await?;
+                                    }
+                                    _ => {}
+                                }
+                                if let Some(row) = composer_row {
+                                    let _ = renderer.render_composer(row, &composer_prompt, &composer.text(), composer.cursor());
+                                }
+                                // Key was consumed by the composer; skip raw input.
+                                continue;
+                            }
+
                             // If scrolled and user types normal input, snap back to bottom
                             if scroll_offset > 0 && is_typing_input(&key_event) {
                                 scroll_offset = 0;
@@ -1412,6 +1470,7 @@ fn handle_prefix_key(key: KeyEvent, cfg: &KeyConfig) -> InputAction {
         KeyCode::Char('-') => InputAction::Send(ClientMsg::Split { horizontal: false }),
         KeyCode::Char('x') => InputAction::Send(ClientMsg::KillPane),
         KeyCode::Char('z') => InputAction::Send(ClientMsg::ZoomPane),
+        KeyCode::Char('i') => InputAction::Send(ClientMsg::ToggleComposer),
         KeyCode::Char('[') => InputAction::EnterCopyMode,
         KeyCode::Char('/') => InputAction::EnterSearchMode,
         KeyCode::Char('c') => InputAction::Send(ClientMsg::NewWindow { name: None }),
