@@ -100,6 +100,24 @@ impl Default for StatusBarConfig {
     }
 }
 
+/// Animation settings.
+#[derive(Debug, Clone)]
+pub struct AnimationConfig {
+    pub enabled: bool,
+    pub duration_ms: u64,
+    pub easing: crate::animation::Easing,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        AnimationConfig {
+            enabled: true,
+            duration_ms: 150,
+            easing: crate::animation::Easing::EaseOut,
+        }
+    }
+}
+
 /// Configuration values parsed from a Lua config file.
 #[derive(Debug, Clone)]
 pub struct LuaConfig {
@@ -110,6 +128,7 @@ pub struct LuaConfig {
     pub status_fg: Color,
     pub bindings: Vec<KeyBinding>,
     pub status_bar: StatusBarConfig,
+    pub animations: AnimationConfig,
 }
 
 impl Default for LuaConfig {
@@ -122,6 +141,7 @@ impl Default for LuaConfig {
             status_fg: Color(0x7a, 0xa2, 0xf7),  // Tokyo Night blue
             bindings: default_bindings(),
             status_bar: StatusBarConfig::default(),
+            animations: AnimationConfig::default(),
         }
     }
 }
@@ -265,6 +285,21 @@ fn eval_lua(source: &str) -> LuaResult<LuaConfig> {
                     if let LuaValue::Table(tbl) = value {
                         if let Ok(segments) = parse_segment_defs(&tbl) {
                             c.status_bar.right = segments;
+                        }
+                    }
+                }
+                "animations" => {
+                    if let LuaValue::Table(tbl) = value {
+                        if let Ok(enabled) = tbl.get::<bool>("enabled") {
+                            c.animations.enabled = enabled;
+                        }
+                        if let Ok(ms) = tbl.get::<i64>("duration_ms") {
+                            if ms >= 0 {
+                                c.animations.duration_ms = ms as u64;
+                            }
+                        }
+                        if let Ok(name) = tbl.get::<String>("easing") {
+                            c.animations.easing = crate::animation::Easing::from_name(&name);
                         }
                     }
                 }
@@ -536,6 +571,14 @@ mod tests {
             key: "h".into(),
             action: "focus-left".into(),
         });
+    }
+
+    #[test]
+    fn animations_config_has_defaults() {
+        let cfg = LuaConfig::default();
+        assert!(cfg.animations.enabled);
+        assert_eq!(cfg.animations.duration_ms, 150);
+        assert_eq!(cfg.animations.easing, crate::animation::Easing::EaseOut);
     }
 
     #[test]
