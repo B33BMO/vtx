@@ -740,6 +740,16 @@ fn handle_message(
             }
             ServerMsg::Error { msg: "No session attached".into() }
         }
+        ClientMsg::ToggleComposer => {
+            // Placeholder: composer state/logic added in a later task.
+            // For now, simply re-render the current state (no-op).
+            if let Some(sid) = cs.attached_session {
+                if let Some(session) = st.sessions.get(&sid) {
+                    return build_render_msg(session, cs.cols, cs.rows, &st.config.status_bar);
+                }
+            }
+            ServerMsg::Error { msg: "No session attached".into() }
+        }
         ClientMsg::SearchScrollback { query } => {
             if let Some(sid) = cs.attached_session {
                 if let Some(session) = st.sessions.get(&sid) {
@@ -1540,6 +1550,7 @@ fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scro
             borders: vec![],
             status,
             total_rows,
+            composer_row: None,
         };
     }
 
@@ -1644,6 +1655,7 @@ fn build_render_msg_scrolled(session: &Session, cols: u16, total_rows: u16, scro
         borders: border_data,
         status,
         total_rows,
+        composer_row: None,
     }
 }
 

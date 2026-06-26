@@ -213,7 +213,7 @@ impl ApplicationHandler<UserEvent> for GpuApp {
                 }
             }
             UserEvent::ServerMsg(msg) => match msg {
-                ServerMsg::Render { panes, focused, borders, status, total_rows } => {
+                ServerMsg::Render { panes, focused, borders, status, total_rows, composer_row: _ } => {
                     let mut status_display = status;
                     if self.scroll_offset > 0 {
                         status_display.left.push(vtx_core::ipc::StatusSegment {

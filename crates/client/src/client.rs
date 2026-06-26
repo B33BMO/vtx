@@ -234,7 +234,7 @@ impl VtxClient {
                 // Server messages (from dedicated reader task)
                 result = server_msg_rx.recv() => {
                     match result {
-                        Some(ServerMsg::Render { panes, focused, borders, status, total_rows }) => {
+                        Some(ServerMsg::Render { panes, focused, borders, status, total_rows, composer_row: _ }) => {
                             let status_display = if search_mode {
                                 StyledStatus::simple(
                                     &format!("search: {}_", search_query),

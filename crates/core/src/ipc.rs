@@ -65,6 +65,8 @@ pub enum ClientMsg {
     Widget { kind: String },
     /// Toggle zoom on the focused pane (fullscreen / restore).
     ZoomPane,
+    /// Toggle the IRC composer for the attached session.
+    ToggleComposer,
     /// Open a floating popup pane. If command is None, spawn default shell.
     PopupPane { command: Option<String> },
     /// Close the active popup pane.
@@ -152,6 +154,9 @@ pub enum ServerMsg {
         borders: Vec<(u16, u16, u16, bool)>,
         status: StyledStatus,
         total_rows: u16,
+        /// Screen row to draw the composer line on, if the composer is active.
+        #[serde(default)]
+        composer_row: Option<u16>,
     },
     Sessions { list: Vec<SessionInfo> },
     /// Result of a scrollback search.
