@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{error, info, warn};
 
 use vtx_core::config::Config;
@@ -32,6 +32,9 @@ struct ServerState {
     plugins: PluginManager,
     /// Name of the currently active theme.
     active_theme: String,
+    /// Frame counter bumped whenever any session drains new output. Clients
+    /// subscribe and re-render their attached session when it changes.
+    frame_tx: watch::Sender<u64>,
 }
 
 impl ServerState {
@@ -39,12 +42,15 @@ impl ServerState {
         let mut plugins = PluginManager::new();
         load_plugins_from_dir(&mut plugins);
 
+        let (frame_tx, _frame_rx) = watch::channel(0u64);
+
         ServerState {
             config,
             sessions: HashMap::new(),
             next_session_id: 0,
             plugins,
             active_theme: "Tokyo Night".to_string(),
+            frame_tx,
         }
     }
 }
