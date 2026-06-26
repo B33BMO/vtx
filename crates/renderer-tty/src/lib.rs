@@ -650,6 +650,27 @@ impl TtyRenderer {
         self.stdout.flush()
     }
 
+    /// Draw the composer line at `row`, then place the terminal cursor at the
+    /// edit position. Drawn directly to stdout (not via the diff buffer), like
+    /// the context menu.
+    pub fn render_composer(&mut self, row: u16, prompt: &str, text: &str, cursor_pos: usize) -> io::Result<()> {
+        let width = self.screen_cols as usize;
+        let line = composer_line(prompt, text, width);
+        queue!(
+            self.stdout,
+            cursor::MoveTo(0, row),
+            SetForegroundColor(to_ct_color(&self.status_fg)),
+            SetBackgroundColor(to_ct_color(&self.status_bg)),
+            style::Print(&line),
+            SetForegroundColor(CtColor::Reset),
+            SetBackgroundColor(CtColor::Reset),
+        )?;
+        let col = (prompt.chars().count() + cursor_pos).min(width.saturating_sub(1)) as u16;
+        queue!(self.stdout, cursor::MoveTo(col, row), cursor::Show)?;
+        self.stdout.flush()?;
+        Ok(())
+    }
+
     /// Get the screen dimensions.
     pub fn screen_size(&self) -> (u16, u16) {
         (self.screen_cols, self.screen_rows)
@@ -807,6 +828,19 @@ impl Drop for TtyRenderer {
     }
 }
 
+/// Compose the visible composer line: `prompt` + `text`, truncated to `width`
+/// keeping the tail (cursor end) visible, then space-padded to `width`.
+pub fn composer_line(prompt: &str, text: &str, width: usize) -> String {
+    let mut s: String = format!("{prompt}{text}");
+    let len = s.chars().count();
+    if len > width {
+        s = s.chars().skip(len - width).collect();
+    } else {
+        s.extend(std::iter::repeat(' ').take(width - len));
+    }
+    s
+}
+
 fn to_ct_color(color: &Color) -> CtColor {
     match color {
         Color::Default => CtColor::Reset,
@@ -867,6 +901,16 @@ mod tests {
         let marker = Cell { c: 'X', fg: Color::Default, bg: Color::Default, attr: Attr::empty() };
         r.set_back(5, 0, marker);
         assert!(r.back.iter().all(|c| c.c != 'X'), "out-of-row write was not clipped");
+    }
+
+    #[test]
+    fn composer_line_renders_prompt_and_truncates() {
+        // Fits: prompt + text, space-padded to width.
+        assert_eq!(composer_line("> ", "hi", 6), "> hi  ");
+        // Too long: keep the tail (cursor end) visible by dropping leading chars.
+        let line = composer_line("> ", "abcdefghij", 6);
+        assert_eq!(line.chars().count(), 6);
+        assert!(line.ends_with('j'), "tail must stay visible: {line:?}");
     }
 }
 
