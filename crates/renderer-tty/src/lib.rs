@@ -4,6 +4,7 @@ use crossterm::{
     terminal,
 };
 use std::io::{self, Write};
+use unicode_width::UnicodeWidthChar;
 use vtx_core::cell::{Attr, Cell, Color};
 use vtx_core::ipc::{PaneRender, StyledStatus};
 use vtx_core::PaneId;
@@ -720,10 +721,19 @@ impl TtyRenderer {
 
         for y in 0..rows {
             need_move = true;
+            let mut skip_next = false;
             for x in 0..cols {
                 let idx = y * cols + x;
                 if idx >= self.back.len() || idx >= self.front.len() {
                     break;
+                }
+
+                if skip_next {
+                    // Continuation column of a wide glyph: the glyph already
+                    // covered it, so don't emit anything here.
+                    skip_next = false;
+                    need_move = true;
+                    continue;
                 }
 
                 if self.back[idx] != self.front[idx] {
@@ -753,8 +763,18 @@ impl TtyRenderer {
                     }
 
                     queue!(self.stdout, style::Print(cell.c))?;
+
+                    if UnicodeWidthChar::width(cell.c) == Some(2) {
+                        // A wide glyph advanced the real cursor by two columns;
+                        // skip its spacer cell and re-anchor the next write.
+                        skip_next = true;
+                        need_move = true;
+                    }
                 } else {
                     need_move = true;
+                    if UnicodeWidthChar::width(self.back[idx].c) == Some(2) {
+                        skip_next = true;
+                    }
                 }
             }
         }

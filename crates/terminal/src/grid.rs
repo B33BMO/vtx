@@ -136,6 +136,20 @@ impl Grid {
 
     /// Write a character at the cursor position and advance.
     pub fn put_char(&mut self, c: char) {
+        use unicode_width::UnicodeWidthChar;
+
+        if self.cols == 0 {
+            return;
+        }
+
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if w == 0 {
+            // Zero-width (combining marks, control chars): don't advance the
+            // cursor or overwrite the following cell.
+            return;
+        }
+
+        // Deferred wrap: a previous char filled the last column.
         if self.cursor_x >= self.cols {
             if self.auto_wrap {
                 self.cursor_x = 0;
@@ -145,16 +159,35 @@ impl Grid {
             }
         }
 
+        // A double-width char that can't fit in the final column wraps first.
+        if w == 2 && self.cursor_x + 1 >= self.cols && self.auto_wrap {
+            self.cursor_x = 0;
+            self.newline();
+        }
+
         let fg = self.fg;
         let bg = self.bg;
         let attr = self.attr;
-        let cell = self.cell_mut(self.cursor_x, self.cursor_y);
+        let x = self.cursor_x;
+        let y = self.cursor_y;
+
+        let cell = self.cell_mut(x, y);
         cell.c = c;
         cell.fg = fg;
         cell.bg = bg;
         cell.attr = attr;
 
-        self.cursor_x += 1;
+        // For a wide char, blank the continuation cell so stale content doesn't
+        // leak through; the renderer skips it based on the lead char's width.
+        if w == 2 && x + 1 < self.cols {
+            let spacer = self.cell_mut(x + 1, y);
+            spacer.c = ' ';
+            spacer.fg = fg;
+            spacer.bg = bg;
+            spacer.attr = attr;
+        }
+
+        self.cursor_x += w as u16;
     }
 
     /// Move cursor to the next line, scrolling if at the bottom of the scroll region.
@@ -617,6 +650,32 @@ mod tests {
         assert_eq!(grid.cursor_x, grid.cols);
 
         grid.insert_chars(1); // must not panic
+    }
+
+    /// H4: a double-width char (CJK/emoji) must advance the cursor by 2 and
+    /// leave a blank spacer in the second cell, so following cells aren't
+    /// shifted left.
+    #[test]
+    fn put_wide_char_advances_two_columns() {
+        let mut grid = Grid::new(6, 1);
+        grid.put_char('世'); // East Asian wide, display width 2
+        assert_eq!(grid.cursor_x, 2, "wide char should advance the cursor by 2");
+        assert_eq!(grid.cell(0, 0).c, '世');
+        assert_eq!(grid.cell(1, 0).c, ' ', "second cell should be a blank spacer");
+        grid.put_char('x');
+        assert_eq!(grid.cell(2, 0).c, 'x', "next char lands after the wide char");
+    }
+
+    /// H4: a zero-width char (combining mark) must not advance the cursor or
+    /// overwrite the following cell.
+    #[test]
+    fn put_zero_width_char_is_ignored() {
+        let mut grid = Grid::new(4, 1);
+        grid.put_char('a');
+        grid.put_char('\u{0301}'); // combining acute accent, width 0
+        assert_eq!(grid.cursor_x, 1, "combining mark must not advance the cursor");
+        assert_eq!(grid.cell(0, 0).c, 'a');
+        assert_eq!(grid.cell(1, 0).c, ' ', "combining mark must not overwrite the next cell");
     }
 
     /// H5: scrollback must stay capped at the limit, evicting the oldest lines
