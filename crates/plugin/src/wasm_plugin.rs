@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 use wasmtime::*;
 
 use crate::hooks::{HookContext, HookEvent};
-use crate::lua_plugin::PluginAction;
+use crate::lua_plugin::{ActionQueue, PluginAction};
 
 /// A single loaded WASM plugin.
 pub struct WasmPlugin {
@@ -18,12 +18,21 @@ pub struct WasmPlugin {
     pub has_on_load: bool,
 }
 
+/// Per-call CPU budget for an untrusted WASM plugin. Refilled before each
+/// `on_load`/`on_hook` invocation so one call can't loop forever, but a single
+/// call gets a generous allowance for legitimate work.
+const PLUGIN_FUEL_BUDGET: u64 = 1_000_000_000;
+/// Hard cap on a plugin's linear memory (64 MiB) to prevent OOM of the host.
+const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
 /// Host state accessible from WASM host functions.
 struct PluginState {
     /// Memory exported by the WASM module.
     memory: Option<Memory>,
     /// Pending actions from this plugin.
-    actions: Arc<Mutex<Vec<PluginAction>>>,
+    actions: Arc<Mutex<ActionQueue>>,
+    /// Resource limits (memory/table growth) enforced by the store.
+    limits: StoreLimits,
 }
 
 impl WasmPlugin {
@@ -43,19 +52,30 @@ impl WasmPlugin {
 
     /// Load a WASM plugin from raw bytes.
     pub fn load_from_bytes(name: &str, wasm_bytes: &[u8]) -> Result<Self, String> {
-        let engine = Engine::default();
+        // Untrusted plugins: bound CPU with fuel and memory with a store limiter.
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)
+            .map_err(|e| format!("failed to configure WASM engine for '{name}': {e}"))?;
         let module = Module::new(&engine, wasm_bytes)
             .map_err(|e| format!("failed to compile WASM module '{name}': {e}"))?;
 
-        let actions: Arc<Mutex<Vec<PluginAction>>> = Arc::new(Mutex::new(Vec::new()));
+        let actions: Arc<Mutex<ActionQueue>> = Arc::new(Mutex::new(ActionQueue::default()));
 
         let mut store = Store::new(
             &engine,
             PluginState {
                 memory: None,
                 actions: Arc::clone(&actions),
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(PLUGIN_MEMORY_LIMIT)
+                    .build(),
             },
         );
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(PLUGIN_FUEL_BUDGET)
+            .map_err(|e| format!("failed to set WASM fuel for '{name}': {e}"))?;
 
         let mut linker = Linker::new(&engine);
 
@@ -297,6 +317,7 @@ impl WasmPlugin {
 
     /// Call the plugin's `on_load` export.
     fn call_on_load(&mut self) {
+        let _ = self.store.set_fuel(PLUGIN_FUEL_BUDGET);
         let func = match self.instance.get_typed_func::<(), ()>(&mut self.store, "on_load") {
             Ok(f) => f,
             Err(_) => return,
@@ -311,6 +332,10 @@ impl WasmPlugin {
         if !self.has_on_hook {
             return Vec::new();
         }
+
+        // Refill the per-call CPU budget so a runaway hook traps instead of
+        // hanging the server, while legitimate hooks get a full allowance.
+        let _ = self.store.set_fuel(PLUGIN_FUEL_BUDGET);
 
         self.store.data().actions.lock().unwrap().clear();
 
@@ -378,24 +403,15 @@ impl WasmPlugin {
             .ok_or("no exported memory")?;
 
         let mem_data = memory.data_mut(&mut self.store);
-        let start = ptr as usize;
-        let end = start + data.len();
-        if end > mem_data.len() {
-            return Err("write out of bounds".into());
-        }
+        let (start, end) = wasm_bounds(mem_data.len(), ptr, data.len() as i32)
+            .ok_or("write out of bounds")?;
         mem_data[start..end].copy_from_slice(data);
         Ok(ptr)
     }
 
     /// Drain pending actions.
     fn drain_actions(&self) -> Vec<PluginAction> {
-        self.store
-            .data()
-            .actions
-            .lock()
-            .unwrap()
-            .drain(..)
-            .collect()
+        self.store.data().actions.lock().unwrap().take()
     }
 }
 
@@ -405,6 +421,21 @@ fn read_wasm_string(caller: &mut Caller<'_, PluginState>, ptr: i32, len: i32) ->
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Validate a plugin-supplied (ptr, len) against the size of WASM linear
+/// memory. Returns the `[start, end)` byte range, or `None` for negative
+/// values, additions that overflow, or spans past the end of memory.
+fn wasm_bounds(mem_len: usize, ptr: i32, len: i32) -> Option<(usize, usize)> {
+    if ptr < 0 || len < 0 {
+        return None;
+    }
+    let start = ptr as usize;
+    let end = start.checked_add(len as usize)?;
+    if end > mem_len {
+        return None;
+    }
+    Some((start, end))
+}
+
 /// Read raw bytes from WASM memory.
 fn read_wasm_bytes(caller: &mut Caller<'_, PluginState>, ptr: i32, len: i32) -> Vec<u8> {
     let memory = match caller.data().memory {
@@ -412,10 +443,40 @@ fn read_wasm_bytes(caller: &mut Caller<'_, PluginState>, ptr: i32, len: i32) -> 
         None => return Vec::new(),
     };
     let data = memory.data(caller);
-    let start = ptr as usize;
-    let end = start + len as usize;
-    if end > data.len() {
-        return Vec::new();
+    match wasm_bounds(data.len(), ptr, len) {
+        Some((start, end)) => data[start..end].to_vec(),
+        None => Vec::new(),
     }
-    data[start..end].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C5: WASM plugins are untrusted, so the engine must bound their CPU via
+    /// fuel. `get_fuel` errors unless `consume_fuel` is enabled, and the store
+    /// must start with a positive budget.
+    #[test]
+    fn wasm_runtime_enables_a_fuel_budget() {
+        let plugin = WasmPlugin::load_from_bytes("probe", b"(module)")
+            .expect("empty module should load");
+        let fuel = plugin
+            .store
+            .get_fuel()
+            .expect("fuel consumption must be enabled on the engine");
+        assert!(fuel > 0, "a positive fuel budget must be set, got {fuel}");
+    }
+
+    /// H7: bounds-checking of plugin-controlled (ptr, len) must reject negative
+    /// values, out-of-range spans, and additions that overflow, rather than
+    /// panicking and unwinding out of a host call.
+    #[test]
+    fn wasm_bounds_rejects_negative_oob_and_overflow() {
+        assert_eq!(wasm_bounds(4, 1, 2), Some((1, 3)));
+        assert_eq!(wasm_bounds(4, 0, 4), Some((0, 4)));
+        assert_eq!(wasm_bounds(4, -1, 2), None);
+        assert_eq!(wasm_bounds(4, 0, -1), None);
+        assert_eq!(wasm_bounds(4, 3, 10), None);
+        assert_eq!(wasm_bounds(4, i32::MAX, i32::MAX), None);
+    }
 }

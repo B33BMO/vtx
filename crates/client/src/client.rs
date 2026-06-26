@@ -1167,6 +1167,10 @@ impl VtxClient {
                                 scroll_offset = 0;
                                 send_msg(&mut writer, &ClientMsg::ScrollBack { offset: 0 }).await?;
                             }
+                            // Update the renderer's geometry so the diff buffers and
+                            // mouse hit-testing track the new size; the server will
+                            // follow with a Render laid out for these dimensions.
+                            renderer.resize(cols, rows);
                             send_msg(&mut writer, &ClientMsg::Resize { cols, rows }).await?;
                         }
                     }
@@ -1294,6 +1298,17 @@ fn check_user_binding(key: &KeyEvent, prefix_active: bool, cfg: &KeyConfig) -> O
 
 /// Process a key event, handling prefix mode and direct bindings.
 fn process_key(key: KeyEvent, prefix_active: &mut bool, cfg: &KeyConfig) -> InputAction {
+    // === Prefix command (the key after the prefix) ===
+    // Handle this first and clear the flag immediately, so a following Alt/Shift
+    // key can't return early and leave the prefix stuck active.
+    if *prefix_active {
+        *prefix_active = false;
+        if let Some(action) = check_user_binding(&key, true, cfg) {
+            return action;
+        }
+        return handle_prefix_key(key, cfg);
+    }
+
     // === Scroll (Shift+PageUp/Down from keyboard) ===
     if key.modifiers.contains(KeyModifiers::SHIFT) {
         match key.code {
@@ -1381,15 +1396,6 @@ fn process_key(key: KeyEvent, prefix_active: &mut bool, cfg: &KeyConfig) -> Inpu
         return InputAction::None;
     }
 
-    if *prefix_active {
-        *prefix_active = false;
-        // Check user-defined prefix bindings first
-        if let Some(action) = check_user_binding(&key, true, cfg) {
-            return action;
-        }
-        return handle_prefix_key(key, cfg);
-    }
-
     // === Normal mode — forward input to shell ===
     let data = key_event_to_bytes(&key);
     if data.is_empty() {
@@ -1456,6 +1462,23 @@ async fn send_msg(
     Ok(())
 }
 
+/// Map a Ctrl-modified character to the byte sent to the PTY. Control codes
+/// exist for `@ A-Z [ \ ] ^ _` (and lowercase letters) which map to 0x00–0x1f;
+/// other characters have no control mapping and are forwarded as-is.
+fn ctrl_byte(c: char) -> Vec<u8> {
+    let upper = (c as u8).to_ascii_uppercase();
+    if c == ' ' {
+        vec![0x00] // Ctrl-Space == Ctrl-@ == NUL
+    } else if c.is_ascii() && (0x40..=0x5f).contains(&upper) {
+        vec![upper & 0x1f]
+    } else if c.is_ascii() {
+        vec![c as u8]
+    } else {
+        let mut buf = [0u8; 4];
+        c.encode_utf8(&mut buf).as_bytes().to_vec()
+    }
+}
+
 fn key_event_to_bytes(event: &KeyEvent) -> Vec<u8> {
     if event.modifiers.contains(KeyModifiers::ALT) {
         return vec![];
@@ -1464,8 +1487,7 @@ fn key_event_to_bytes(event: &KeyEvent) -> Vec<u8> {
     match event.code {
         KeyCode::Char(c) => {
             if event.modifiers.contains(KeyModifiers::CONTROL) {
-                let byte = (c as u8).to_ascii_lowercase() - b'a' + 1;
-                vec![byte]
+                ctrl_byte(c)
             } else {
                 let mut buf = [0u8; 4];
                 let s = c.encode_utf8(&mut buf);
@@ -1531,4 +1553,38 @@ fn base64_encode(data: &[u8]) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H8: Ctrl+letter maps to its ASCII control code.
+    #[test]
+    fn ctrl_letter_maps_to_control_code() {
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(&a), vec![1]);
+        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(&m), vec![13]);
+    }
+
+    /// H8: Ctrl+non-letter must not underflow `(c as u8) - b'a'`.
+    #[test]
+    fn ctrl_non_letter_does_not_underflow() {
+        let rbracket = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(&rbracket), vec![0x1d]);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(&space), vec![0x00]);
+    }
+
+    /// H11: the prefix flag must be cleared after the following key, even when
+    /// that key is an Alt combo (which previously returned before the reset).
+    #[test]
+    fn prefix_is_cleared_after_following_alt_key() {
+        let cfg = KeyConfig { prefix_key: 'a', bindings: vec![] };
+        let mut prefix = true;
+        let alt_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        let _ = process_key(alt_x, &mut prefix, &cfg);
+        assert!(!prefix, "prefix must be cleared after the key following the prefix");
+    }
 }

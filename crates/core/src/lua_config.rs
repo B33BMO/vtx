@@ -10,7 +10,9 @@ impl Color {
     /// Parse a hex color string like "#282828" or "282828".
     pub fn from_hex(s: &str) -> Option<Color> {
         let s = s.strip_prefix('#').unwrap_or(s);
-        if s.len() != 6 {
+        // Require exactly 6 ASCII bytes: `is_ascii` guarantees the byte slices
+        // below fall on char boundaries (a multibyte char would panic).
+        if s.len() != 6 || !s.is_ascii() {
             return None;
         }
         let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -479,6 +481,13 @@ mod tests {
         assert_eq!(Color::from_hex("#ff0000"), Some(Color(255, 0, 0)));
         assert_eq!(Color::from_hex("nope"), None);
         assert_eq!(Color::from_hex("#gg0000"), None);
+    }
+
+    /// H6: a 6-byte string containing a multibyte char must not panic on a
+    /// non-char-boundary byte slice; it should simply be rejected.
+    #[test]
+    fn from_hex_rejects_non_ascii_without_panicking() {
+        assert_eq!(Color::from_hex("a\u{20ac}bc"), None); // 'a' + '€'(3 bytes) + 'b' + 'c' = 6 bytes
     }
 
     #[test]

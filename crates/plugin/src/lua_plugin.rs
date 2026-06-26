@@ -24,6 +24,34 @@ pub enum PluginAction {
     Popup { command: Option<String> },
 }
 
+/// Maximum number of actions a single plugin call may queue. Excess actions are
+/// dropped so a runaway plugin can't exhaust host memory via the action queue.
+pub const MAX_PLUGIN_ACTIONS: usize = 1024;
+
+/// A bounded queue of plugin actions. `push` silently drops actions once the
+/// cap is reached, keeping the same call-site syntax as a `Vec`.
+#[derive(Default)]
+pub struct ActionQueue {
+    inner: Vec<PluginAction>,
+}
+
+impl ActionQueue {
+    pub fn push(&mut self, action: PluginAction) {
+        if self.inner.len() < MAX_PLUGIN_ACTIONS {
+            self.inner.push(action);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+
+    /// Remove and return all queued actions.
+    pub fn take(&mut self) -> Vec<PluginAction> {
+        std::mem::take(&mut self.inner)
+    }
+}
+
 /// A single loaded Lua plugin.
 pub struct LuaPlugin {
     pub name: String,
@@ -34,7 +62,7 @@ pub struct LuaPlugin {
     /// The callbacks themselves are stored in Lua's `__vtx_cmds` table.
     pub commands: HashSet<String>,
     /// Pending actions requested by the plugin during the last call.
-    actions: Arc<Mutex<Vec<PluginAction>>>,
+    actions: Arc<Mutex<ActionQueue>>,
 }
 
 impl LuaPlugin {
@@ -54,10 +82,18 @@ impl LuaPlugin {
 
     /// Load a Lua plugin from a source string (useful for testing).
     pub fn load_from_str(name: &str, source: &str) -> Result<Self, String> {
-        let lua = Lua::new();
+        // Plugins are user-supplied and may be third-party, so construct the
+        // runtime with an explicit safe allowlist instead of the full stdlib.
+        // This omits `os`, `io`, `package`/`require`, `debug`, and `ffi`, so a
+        // plugin can't execute commands, touch the filesystem, or load code.
+        let lua = Lua::new_with(
+            mlua::StdLib::TABLE | mlua::StdLib::STRING | mlua::StdLib::MATH | mlua::StdLib::COROUTINE,
+            mlua::LuaOptions::default(),
+        )
+        .map_err(|e| format!("failed to init Lua sandbox for '{name}': {e}"))?;
         let hooks: Arc<Mutex<HashSet<HookEvent>>> = Arc::new(Mutex::new(HashSet::new()));
         let commands: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let actions: Arc<Mutex<Vec<PluginAction>>> = Arc::new(Mutex::new(Vec::new()));
+        let actions: Arc<Mutex<ActionQueue>> = Arc::new(Mutex::new(ActionQueue::default()));
 
         // Build the `vtx` API table.
         let result = (|| -> LuaResult<()> {
@@ -366,14 +402,26 @@ impl LuaPlugin {
 
     /// Drain and return all pending plugin actions.
     fn drain_actions(&self) -> Vec<PluginAction> {
-        let mut actions = self.actions.lock().unwrap();
-        actions.drain(..).collect()
+        self.actions.lock().unwrap().take()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C4: the Lua runtime must not expose the `os`/`io` stdlib to plugins,
+    /// which are user-supplied and may be third-party. A probe that errors if
+    /// those globals exist should load cleanly once they're sandboxed away.
+    #[test]
+    fn lua_runtime_sandboxes_os_and_io() {
+        let probe = r#"
+            if os ~= nil then error("os is exposed") end
+            if io ~= nil then error("io is exposed") end
+        "#;
+        let res = LuaPlugin::load_from_str("probe", probe);
+        assert!(res.is_ok(), "os/io should be sandboxed away, got err: {:?}", res.err());
+    }
 
     #[test]
     fn test_load_simple_plugin() {
@@ -405,6 +453,25 @@ mod tests {
             PluginAction::Notify { message } => assert_eq!(message, "New pane: 42"),
             _ => panic!("expected Notify action"),
         }
+    }
+
+    /// H10: a plugin hook that floods the action queue must not grow it without
+    /// bound; the queue is capped and excess actions are dropped.
+    #[test]
+    fn plugin_action_queue_is_capped() {
+        let source = r#"
+            vtx.register_hook("on_pane_create", function(ctx)
+                for _ = 1, 50000 do vtx.notify("spam") end
+            end)
+        "#;
+        let plugin = LuaPlugin::load_from_str("flood", source).unwrap();
+        let ctx = HookContext { pane_id: Some(1), ..Default::default() };
+        let actions = plugin.dispatch_hook(HookEvent::PaneCreate, &ctx);
+        assert!(
+            actions.len() <= MAX_PLUGIN_ACTIONS,
+            "action queue must be capped, got {}",
+            actions.len()
+        );
     }
 
     #[test]

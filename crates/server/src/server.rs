@@ -181,11 +181,19 @@ async fn handle_client(
         tokio::select! {
             _ = pty_rx.recv() => {
                 if let Some(sid) = cs.attached_session {
-                    let st = state.lock().await;
-                    if let Some(session) = st.sessions.get(&sid) {
-                        let msg = build_render_msg_scrolled(session, cs.cols, cs.rows, cs.scroll_offset, &st.config.status_bar);
-                        let mut json = serde_json::to_string(&msg).unwrap();
-                        json.push('\n');
+                    // Build the frame under the state lock, then release it
+                    // before the socket write so a slow client can't stall
+                    // every other client holding the global lock.
+                    let json = {
+                        let st = state.lock().await;
+                        st.sessions.get(&sid).map(|session| {
+                            let msg = build_render_msg_scrolled(session, cs.cols, cs.rows, cs.scroll_offset, &st.config.status_bar);
+                            let mut json = serde_json::to_string(&msg).unwrap();
+                            json.push('\n');
+                            json
+                        })
+                    };
+                    if let Some(json) = json {
                         let mut w = writer.lock().await;
                         if w.write_all(json.as_bytes()).await.is_err() {
                             break;

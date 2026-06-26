@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use vtx_core::{PaneId, Result, VtxError};
@@ -12,6 +12,8 @@ enum PaneBackend {
         master: Box<dyn MasterPty + Send>,
         writer: Box<dyn Write + Send>,
         pty_rx: mpsc::Receiver<Vec<u8>>,
+        /// The child process. Held so it can be killed and reaped on drop.
+        child: Box<dyn Child + Send + Sync>,
     },
     Widget {
         widget: Box<dyn widget::Widget>,
@@ -91,6 +93,7 @@ impl Pane {
                 master: pair.master,
                 writer,
                 pty_rx,
+                child,
             },
             dead: false,
             child_pid,
@@ -155,6 +158,7 @@ impl Pane {
                 master: pair.master,
                 writer,
                 pty_rx,
+                child,
             },
             dead: false,
             child_pid,
@@ -234,6 +238,7 @@ impl Pane {
                 master: pair.master,
                 writer,
                 pty_rx,
+                child,
             },
             dead: false,
             child_pid,
@@ -356,5 +361,45 @@ impl Pane {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        // Kill and reap the child so closing a pane doesn't leak processes,
+        // zombies, threads, or PTY fds. Killing the child closes the slave,
+        // which makes the reader thread hit EOF and exit.
+        if let PaneBackend::Pty { child, .. } = &mut self.backend {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pid_alive(pid: u32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        kill(Pid::from_raw(pid as i32), None).is_ok()
+    }
+
+    /// C1: dropping a pane must kill AND reap its child process. Previously the
+    /// `Child` handle was discarded at spawn, so closed panes left orphaned
+    /// processes / unreaped zombies.
+    #[test]
+    fn dropping_a_pane_reaps_its_child() {
+        let pane = Pane::spawn(PaneId(1), 80, 24, "/bin/cat").expect("spawn cat");
+        let pid = pane.child_pid.expect("child pid");
+        assert!(pid_alive(pid), "child should be running after spawn");
+
+        drop(pane);
+
+        assert!(
+            !pid_alive(pid),
+            "child should be killed and reaped once the pane is dropped"
+        );
     }
 }

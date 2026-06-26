@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use vtx_core::cell::{Attr, Cell, Color};
 
 /// A fixed-size grid of terminal cells with a cursor.
@@ -49,7 +50,7 @@ pub struct Grid {
     pub pending_responses: Vec<Vec<u8>>,
 
     // Scrollback buffer — stores lines that scrolled off the top
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: VecDeque<Vec<Cell>>,
     pub scrollback_limit: usize,
 }
 
@@ -85,7 +86,7 @@ impl Grid {
             tab_stops: Self::default_tab_stops(cols),
             title: String::new(),
             pending_responses: Vec::new(),
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             scrollback_limit: 100_000,
         }
     }
@@ -185,9 +186,9 @@ impl Grid {
             let top_row: Vec<Cell> = (0..cols)
                 .map(|x| self.cells[x].clone())
                 .collect();
-            self.scrollback.push(top_row);
+            self.scrollback.push_back(top_row);
             if self.scrollback.len() > self.scrollback_limit {
-                self.scrollback.remove(0);
+                self.scrollback.pop_front(); // O(1) eviction (was O(n) Vec::remove(0))
             }
         }
 
@@ -285,9 +286,14 @@ impl Grid {
 
     /// Insert n blank characters at cursor, shifting chars right.
     pub fn insert_chars(&mut self, n: u16) {
+        if self.cols == 0 {
+            return;
+        }
         let y = self.cursor_y;
         let cols = self.cols;
-        let x = self.cursor_x;
+        // Clamp the cursor to the last column: after writing the final column
+        // the cursor sits at `cols` (deferred wrap), which would index OOB.
+        let x = self.cursor_x.min(cols - 1);
 
         for _ in 0..n {
             // Shift right
@@ -301,9 +307,12 @@ impl Grid {
 
     /// Delete n characters at cursor, shifting chars left.
     pub fn delete_chars(&mut self, n: u16) {
+        if self.cols == 0 {
+            return;
+        }
         let y = self.cursor_y;
         let cols = self.cols;
-        let x = self.cursor_x;
+        let x = self.cursor_x.min(cols - 1);
 
         for _ in 0..n {
             for col in x..cols.saturating_sub(1) {
@@ -589,5 +598,51 @@ impl Grid {
         }
 
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C2: writing into the last column leaves the cursor at `cursor_x == cols`
+    /// (deferred wrap). A subsequent CSI @ (insert chars) must not index out of
+    /// bounds. On the last row this previously panicked (`idx == cells.len()`).
+    #[test]
+    fn insert_chars_at_deferred_wrap_column_does_not_panic() {
+        let mut grid = Grid::new(4, 2);
+        grid.cursor_y = 1;
+        grid.cursor_x = 3;
+        grid.put_char('x'); // cursor_x advances to 4 == cols (deferred wrap)
+        assert_eq!(grid.cursor_x, grid.cols);
+
+        grid.insert_chars(1); // must not panic
+    }
+
+    /// H5: scrollback must stay capped at the limit, evicting the oldest lines
+    /// and keeping the most recent. (Characterizes behavior across the
+    /// Vec→VecDeque change that removes the O(n) `remove(0)` eviction.)
+    #[test]
+    fn scrollback_is_capped_and_keeps_most_recent() {
+        let mut grid = Grid::new(2, 1);
+        grid.scrollback_limit = 3;
+        for i in 0..6u8 {
+            grid.cursor_x = 0;
+            grid.put_char((b'a' + i) as char);
+            grid.newline(); // 1-row grid: scrolls the row into scrollback
+        }
+        assert_eq!(grid.scrollback_len(), 3, "scrollback must be capped at the limit");
+        assert!(grid.search("a").is_empty(), "oldest line should be evicted");
+        assert!(!grid.search("f").is_empty(), "most recent line should be retained");
+    }
+
+    /// C2/M6: char ops on a zero-width grid (e.g. a pane collapsed to 0 cols)
+    /// must not underflow `cols - 1` and index out of bounds.
+    #[test]
+    fn char_ops_on_zero_width_grid_do_not_panic() {
+        let mut grid = Grid::new(0, 1);
+        grid.insert_chars(1);
+        grid.delete_chars(1);
+        grid.erase_chars(1);
     }
 }

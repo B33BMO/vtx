@@ -1,9 +1,36 @@
 //! Gathers system stats and git info for the status bar.
 //! Reads from /proc directly — no external crate dependencies.
 
-use std::path::Path;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
+
+/// Return a cached value for `key`, invoking `compute` only when there is no
+/// entry or the existing one is older than `ttl`. Keeps expensive work (like
+/// forking git) off the per-frame render path.
+fn get_cached<K, V>(
+    cache: &Mutex<HashMap<K, (Instant, V)>>,
+    key: &K,
+    now: Instant,
+    ttl: Duration,
+    compute: impl FnOnce() -> V,
+) -> V
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+{
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t, v)) = map.get(key) {
+        if now.duration_since(*t) <= ttl {
+            return v.clone();
+        }
+    }
+    let v = compute();
+    map.insert(key.clone(), (now, v.clone()));
+    v
+}
 
 /// Cached system/git info for the status bar.
 struct CachedInfo {
@@ -19,12 +46,17 @@ struct CachedInfo {
 static CACHE: Mutex<Option<CachedInfo>> = Mutex::new(None);
 
 /// Git info for a working directory.
+#[derive(Clone)]
 pub struct GitInfo {
     pub branch: String,
     pub dirty: bool,
     pub ahead: u32,
     pub behind: u32,
 }
+
+#[allow(clippy::type_complexity)]
+static GIT_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, Option<GitInfo>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// System stats.
 pub struct SysInfo {
@@ -35,7 +67,19 @@ pub struct SysInfo {
 }
 
 /// Get git info for the given directory. Returns None if not a git repo.
+/// Cached per directory with a short TTL so the status bar doesn't fork `git`
+/// on every render frame.
 pub fn git_info(cwd: &Path) -> Option<GitInfo> {
+    get_cached(
+        &GIT_CACHE,
+        &cwd.to_path_buf(),
+        Instant::now(),
+        Duration::from_secs(2),
+        || git_info_uncached(cwd),
+    )
+}
+
+fn git_info_uncached(cwd: &Path) -> Option<GitInfo> {
     // Get branch name
     let branch_output = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -234,5 +278,30 @@ pub fn format_mem(mb: u64) -> String {
         }
     } else {
         format!("{}M", mb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// H3: the TTL cache must compute once within the window and recompute only
+    /// after it expires — the basis for not re-forking git on every frame.
+    #[test]
+    fn get_cached_computes_once_within_ttl_then_refreshes() {
+        let cache: Mutex<HashMap<u32, (Instant, u32)>> = Mutex::new(HashMap::new());
+        let now = Instant::now();
+        let ttl = Duration::from_secs(2);
+        let mut calls = 0u32;
+
+        let a = get_cached(&cache, &1, now, ttl, || { calls += 1; 42 });
+        let b = get_cached(&cache, &1, now, ttl, || { calls += 1; 99 });
+        assert_eq!((a, b), (42, 42), "second call within TTL returns cached value");
+        assert_eq!(calls, 1, "compute runs once within the TTL");
+
+        let c = get_cached(&cache, &1, now + Duration::from_secs(3), ttl, || { calls += 1; 7 });
+        assert_eq!(c, 7, "value recomputed after TTL expiry");
+        assert_eq!(calls, 2);
     }
 }

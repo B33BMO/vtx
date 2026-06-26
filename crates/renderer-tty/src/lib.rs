@@ -115,10 +115,15 @@ impl TtyRenderer {
         )?;
 
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        let size = cols as usize * rows as usize;
+        Ok(Self::with_size(cols, rows))
+    }
 
-        Ok(TtyRenderer {
-            stdout,
+    /// Build the renderer state for a given screen size without touching the
+    /// terminal (no raw mode / alternate screen). Used by `new` and tests.
+    fn with_size(cols: u16, rows: u16) -> Self {
+        let size = cols as usize * rows as usize;
+        TtyRenderer {
+            stdout: io::stdout(),
             front: vec![sentinel_cell(); size], // sentinel forces full first draw
             back: vec![Cell::default(); size],
             screen_cols: cols,
@@ -126,7 +131,14 @@ impl TtyRenderer {
             status_fg: Color::Rgb(0x7a, 0xa2, 0xf7),  // Tokyo Night blue
             status_bg: Color::Rgb(0x1a, 0x1b, 0x26),  // Tokyo Night bg
             click_zones: vec![],
-        })
+        }
+    }
+
+    /// Update the renderer to a new terminal size. Reallocates the diff
+    /// buffers and forces a full redraw on the next frame. Call this from the
+    /// client whenever the terminal is resized.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.ensure_size(cols, rows);
     }
 
     /// Handle terminal resize.
@@ -678,6 +690,11 @@ impl TtyRenderer {
 
     #[inline]
     fn set_back(&mut self, x: u16, y: u16, cell: Cell) {
+        // Clip by column and row, not just by linear index: an x past the row
+        // width has an in-range index but would wrap onto the next row.
+        if x >= self.screen_cols || y >= self.screen_rows {
+            return;
+        }
         let idx = y as usize * self.screen_cols as usize + x as usize;
         if idx < self.back.len() {
             self.back[idx] = cell;
@@ -803,5 +820,33 @@ fn emit_attr_diff(stdout: &mut io::Stdout, _old: Attr, new: Attr) -> io::Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C3: a terminal resize must update the renderer's known dimensions so
+    /// `screen_size` (used for mouse hit-testing) and the diff buffers track
+    /// the new geometry. Previously the renderer was frozen at startup size.
+    #[test]
+    fn resize_updates_screen_size() {
+        let mut r = TtyRenderer::with_size(80, 24);
+        assert_eq!(r.screen_size(), (80, 24));
+
+        r.resize(100, 40);
+        assert_eq!(r.screen_size(), (100, 40));
+    }
+
+    /// M7: `set_back` must clip writes whose column is past the right edge,
+    /// not wrap them onto the next row. On a 4-col screen, x=5 has linear
+    /// index 5 (< buffer len) and previously corrupted cell (1,1).
+    #[test]
+    fn set_back_clips_columns_past_right_edge() {
+        let mut r = TtyRenderer::with_size(4, 3);
+        let marker = Cell { c: 'X', fg: Color::Default, bg: Color::Default, attr: Attr::empty() };
+        r.set_back(5, 0, marker);
+        assert!(r.back.iter().all(|c| c.c != 'X'), "out-of-row write was not clipped");
+    }
 }
 
