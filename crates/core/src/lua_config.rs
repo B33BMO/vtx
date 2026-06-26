@@ -118,6 +118,19 @@ impl Default for AnimationConfig {
     }
 }
 
+/// IRC-style composer settings.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComposerConfig {
+    pub enabled: bool,
+    pub prompt: String,
+}
+
+impl Default for ComposerConfig {
+    fn default() -> Self {
+        ComposerConfig { enabled: false, prompt: "\u{203a} ".to_string() }
+    }
+}
+
 /// Configuration values parsed from a Lua config file.
 #[derive(Debug, Clone)]
 pub struct LuaConfig {
@@ -129,6 +142,7 @@ pub struct LuaConfig {
     pub bindings: Vec<KeyBinding>,
     pub status_bar: StatusBarConfig,
     pub animations: AnimationConfig,
+    pub composer: ComposerConfig,
 }
 
 impl Default for LuaConfig {
@@ -142,6 +156,7 @@ impl Default for LuaConfig {
             bindings: default_bindings(),
             status_bar: StatusBarConfig::default(),
             animations: AnimationConfig::default(),
+            composer: ComposerConfig::default(),
         }
     }
 }
@@ -300,6 +315,16 @@ fn eval_lua(source: &str) -> LuaResult<LuaConfig> {
                         }
                         if let Ok(name) = tbl.get::<String>("easing") {
                             c.animations.easing = crate::animation::Easing::from_name(&name);
+                        }
+                    }
+                }
+                "composer" => {
+                    if let LuaValue::Table(tbl) = value {
+                        if let Ok(enabled) = tbl.get::<bool>("enabled") {
+                            c.composer.enabled = enabled;
+                        }
+                        if let Ok(prompt) = tbl.get::<String>("prompt") {
+                            c.composer.prompt = prompt;
                         }
                     }
                 }
@@ -579,6 +604,13 @@ mod tests {
         assert!(cfg.animations.enabled);
         assert_eq!(cfg.animations.duration_ms, 150);
         assert_eq!(cfg.animations.easing, crate::animation::Easing::EaseOut);
+    }
+
+    #[test]
+    fn composer_config_has_defaults() {
+        let cfg = LuaConfig::default();
+        assert!(!cfg.composer.enabled); // opt-in: off by default
+        assert_eq!(cfg.composer.prompt, "\u{203a} "); // "› "
     }
 
     #[test]

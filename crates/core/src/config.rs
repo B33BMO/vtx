@@ -23,6 +23,9 @@ pub struct Config {
     /// Animation settings
     #[serde(default)]
     pub animations: lua_config::AnimationConfig,
+    /// IRC-style composer settings
+    #[serde(default)]
+    pub composer: lua_config::ComposerConfig,
 }
 
 impl Default for Config {
@@ -40,6 +43,7 @@ impl Default for Config {
             bindings: lua_cfg.bindings,
             status_bar: lua_cfg.status_bar,
             animations: lua_cfg.animations,
+            composer: lua_cfg.composer,
         }
     }
 }
@@ -55,6 +59,7 @@ impl Config {
         self.bindings = lua_cfg.bindings;
         self.status_bar = lua_cfg.status_bar;
         self.animations = lua_cfg.animations;
+        self.composer = lua_cfg.composer;
     }
 }
 
