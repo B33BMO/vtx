@@ -98,6 +98,21 @@ impl VtxServer {
             }
         });
 
+        // Server-owned drain tick: drains all sessions ~125x/sec regardless of
+        // attached clients (fixes the detached-session memory leak) and bumps
+        // the frame counter so attached clients re-render.
+        let drain_state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(8));
+            loop {
+                interval.tick().await;
+                let mut st = drain_state.lock().await;
+                if drain_all_sessions(&mut st) {
+                    st.frame_tx.send_modify(|v| *v = v.wrapping_add(1));
+                }
+            }
+        });
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -124,7 +139,6 @@ async fn handle_client(
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
 
-    let (pty_tx, mut pty_rx) = mpsc::channel::<()>(64);
     // Channel for client messages — read_line runs in its own task so it's never cancelled
     let (msg_tx, mut msg_rx) = mpsc::channel::<ClientMsg>(64);
 
@@ -135,20 +149,11 @@ async fn handle_client(
         scroll_offset: 0,
     };
 
-    // PTY polling task — drains channel-based readers, no blocking
-    let poll_state = Arc::clone(&state);
-    let poll_handle = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-
-            let mut st = poll_state.lock().await;
-            let any_output = drain_all_sessions(&mut st);
-            drop(st);
-            if any_output {
-                let _ = pty_tx.try_send(());
-            }
-        }
-    });
+    // Re-render this client whenever any session drains output.
+    let mut frame_rx = {
+        let st = state.lock().await;
+        st.frame_tx.subscribe()
+    };
 
     // Dedicated reader task — read_line is NOT cancel-safe in select!,
     // so we give it its own task where it's never cancelled.
@@ -181,7 +186,7 @@ async fn handle_client(
     // Main message loop — only uses cancel-safe channel receives
     loop {
         tokio::select! {
-            _ = pty_rx.recv() => {
+            _ = frame_rx.changed() => {
                 if let Some(sid) = cs.attached_session {
                     // Build the frame under the state lock, then release it
                     // before the socket write so a slow client can't stall
@@ -234,7 +239,6 @@ async fn handle_client(
         }
     }
 
-    poll_handle.abort();
     reader_handle.abort();
     Ok(())
 }
