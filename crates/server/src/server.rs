@@ -34,23 +34,29 @@ struct ServerState {
     active_theme: String,
 }
 
+impl ServerState {
+    pub fn new(config: Config) -> Self {
+        let mut plugins = PluginManager::new();
+        load_plugins_from_dir(&mut plugins);
+
+        ServerState {
+            config,
+            sessions: HashMap::new(),
+            next_session_id: 0,
+            plugins,
+            active_theme: "Tokyo Night".to_string(),
+        }
+    }
+}
+
 pub struct VtxServer {
     state: Arc<Mutex<ServerState>>,
 }
 
 impl VtxServer {
     pub fn new(config: Config) -> Self {
-        let mut plugins = PluginManager::new();
-        load_plugins_from_dir(&mut plugins);
-
         VtxServer {
-            state: Arc::new(Mutex::new(ServerState {
-                config,
-                sessions: HashMap::new(),
-                next_session_id: 0,
-                plugins,
-                active_theme: "Tokyo Night".to_string(),
-            })),
+            state: Arc::new(Mutex::new(ServerState::new(config))),
         }
     }
 
@@ -130,18 +136,8 @@ async fn handle_client(
             tokio::time::sleep(std::time::Duration::from_millis(8)).await;
 
             let mut st = poll_state.lock().await;
-            let mut any_output = false;
-
-            for session in st.sessions.values_mut() {
-                for window in session.windows.iter_mut() {
-                    for pane in window.panes.values_mut() {
-                        if pane.drain_output() {
-                            any_output = true;
-                        }
-                    }
-                }
-            }
-
+            let any_output = drain_all_sessions(&mut st);
+            drop(st);
             if any_output {
                 let _ = pty_tx.try_send(());
             }
@@ -1734,8 +1730,39 @@ fn load_plugins_from_dir(mgr: &mut PluginManager) {
     }
 }
 
+/// Drain pending PTY output from every pane of every session into its grid.
+/// Returns `true` if any pane produced output. Runs regardless of whether a
+/// client is attached, so detached sessions don't accumulate unbounded output.
+fn drain_all_sessions(state: &mut ServerState) -> bool {
+    let mut any_output = false;
+    for session in state.sessions.values_mut() {
+        for window in session.windows.iter_mut() {
+            for pane in window.panes.values_mut() {
+                if pane.drain_output() {
+                    any_output = true;
+                }
+            }
+        }
+    }
+    any_output
+}
+
 /// Get a path under `~/.config/vtx/<subdir>`.
 fn dirs_path(subdir: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(PathBuf::from(home).join(".config").join("vtx").join(subdir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vtx_core::config::Config;
+
+    /// H1 (part 1): the drain helper must walk every session/window/pane.
+    /// On an empty server it reports no output and does not panic.
+    #[test]
+    fn drain_all_sessions_on_empty_state_reports_no_output() {
+        let mut state = ServerState::new(Config::default());
+        assert!(!drain_all_sessions(&mut state));
+    }
 }
